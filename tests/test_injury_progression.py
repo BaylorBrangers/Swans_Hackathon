@@ -1,4 +1,4 @@
-"""Tests for deterministic injury progression inference."""
+"""Tests for conservative, auditable injury progression inference."""
 
 from __future__ import annotations
 
@@ -7,105 +7,176 @@ import unittest
 import pandas as pd
 
 from injury_progression import (
+    SEVERITY_LABELS,
+    available_body_parts,
     build_progression,
+    canonical_body_part,
     extract_observations,
     infer_severity,
-    marker_coordinates,
+    marker_locations,
 )
 
 
-class SeverityInferenceTests(unittest.TestCase):
-    def test_severe_pain_is_red(self) -> None:
-        result = infer_severity("Severe shoulder pain rated 9/10.", "shoulder")
-        self.assertEqual(result.action, "severe")
-        self.assertEqual(result.suggested_level, 3)
+def event(date, event_id, medicine_type, body_parts, summary, **kwargs):
+    return {
+        "encounter_date": pd.Timestamp(date),
+        "event_id": event_id,
+        "medicine_type": medicine_type,
+        "body_parts": body_parts,
+        "summary": summary,
+        "record_type": kwargs.get("record_type", "Encounter Note"),
+        "primary_provider": kwargs.get("primary_provider", "Provider"),
+        "facility": kwargs.get("facility", "Facility"),
+        "pdf_url": kwargs.get("pdf_url", f"https://example.com/{event_id}.pdf"),
+    }
 
-    def test_negated_fracture_is_not_severe(self) -> None:
+
+class SeverityInferenceTests(unittest.TestCase):
+    def test_severe_pain(self):
+        result = infer_severity("Severe shoulder pain rated 9/10.", "shoulder")
+        self.assertEqual(result.severity, 3)
+        self.assertEqual(result.pain_score, 9)
+
+    def test_negated_fracture_does_not_make_severe(self):
         result = infer_severity(
             "Neck pain is present. No acute cervical fracture was seen.", "neck"
         )
-        self.assertEqual(result.action, "injury")
-        self.assertEqual(result.suggested_level, 1)
+        self.assertEqual(result.severity, 1)
 
-    def test_body_specific_sentences_are_used(self) -> None:
-        summary = "Neck pain is worsening to 7/10. Shoulder pain is severe at 9/10."
-        neck = infer_severity(summary, "neck")
-        shoulder = infer_severity(summary, "shoulder")
-        self.assertEqual(neck.action, "worsening")
-        self.assertEqual(shoulder.action, "severe")
-        self.assertTrue(neck.context_specific)
-        self.assertTrue(shoulder.context_specific)
+    def test_no_cross_body_contamination(self):
+        summary = "Severe neck pain rated 9/10. Hand imaging was unremarkable."
+        hand = infer_severity(summary, "hand")
+        self.assertIsNone(hand.severity)
+        self.assertEqual(hand.confidence, "Low")
 
-    def test_improvement_and_resolution(self) -> None:
-        self.assertEqual(
-            infer_severity("Back symptoms are improving.", "back").action,
-            "improving",
-        )
-        self.assertEqual(
-            infer_severity("The patient is now pain-free in the back.", "back").action,
-            "resolved",
-        )
+    def test_no_body_specific_sentence_is_unknown(self):
+        result = infer_severity("Patient reports severe headache rated 9/10.", "knee")
+        self.assertIsNone(result.severity)
+        self.assertFalse(result.context_specific)
 
-    def test_laterality_coordinates(self) -> None:
-        self.assertEqual(len(marker_coordinates("shoulder")), 2)
-        self.assertEqual(len(marker_coordinates("left shoulder")), 1)
-        self.assertNotEqual(
-            marker_coordinates("left shoulder"),
-            marker_coordinates("right shoulder"),
+    def test_current_pain_score_beats_historical_score(self):
+        result = infer_severity("Neck pain was 8/10 but is now 3/10.", "neck")
+        self.assertEqual(result.pain_score, 3)
+        self.assertEqual(result.severity, 1)
+
+    def test_resolution(self):
+        result = infer_severity(
+            "Low back pain has resolved and the patient is pain-free.", "lower back"
         )
+        self.assertEqual(result.severity, 0)
+        self.assertEqual(result.trend_hint, "resolved")
+
+    def test_laterality_front_and_back(self):
+        left = marker_locations("left shoulder")
+        right = marker_locations("right shoulder")
+        self.assertEqual(len(left), 1)
+        self.assertEqual(len(right), 1)
+        self.assertNotEqual(left[0].x, right[0].x)
+
+        left_back = marker_locations("left scapula")
+        right_back = marker_locations("right scapula")
+        self.assertLess(left_back[0].x, right_back[0].x)
+
+    def test_unmapped_body_is_not_silently_placed(self):
+        self.assertEqual(marker_locations("ear"), [])
+
+    def test_alias_normalization(self):
+        self.assertEqual(canonical_body_part("L lumbar spine"), "left lower back")
+        self.assertEqual(canonical_body_part("SI joint"), "sacrum")
+        self.assertEqual(canonical_body_part("L spine"), "lower back")
 
 
 class ProgressionTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.events = pd.DataFrame(
+    def test_explicit_lower_pain_lowers_severity(self):
+        df = pd.DataFrame(
             [
-                {
-                    "encounter_date": pd.Timestamp("2024-01-01"),
-                    "medicine_type": "Orthopedic",
-                    "body_parts": "Neck, Shoulder",
-                    "summary": "Neck and shoulder pain with tenderness.",
-                },
-                {
-                    "encounter_date": pd.Timestamp("2024-02-01"),
-                    "medicine_type": "Orthopedic",
-                    "body_parts": "Neck",
-                    "summary": "Neck pain is worsening and rated 7/10.",
-                },
-                {
-                    "encounter_date": pd.Timestamp("2024-03-01"),
-                    "medicine_type": "Orthopedic",
-                    "body_parts": "Neck",
-                    "summary": "Severe neck pain rated 9/10.",
-                },
-                {
-                    "encounter_date": pd.Timestamp("2024-04-01"),
-                    "medicine_type": "Orthopedic",
-                    "body_parts": "Shoulder",
-                    "summary": "Shoulder pain has resolved.",
-                },
+                event("2024-01-01", "E1", "Emergency", "Neck", "Neck pain rated 9/10."),
+                event("2024-02-01", "E2", "Orthopedic", "Neck", "Neck pain rated 3/10."),
             ]
         )
+        obs = extract_observations(df, "neck")
+        snapshots, changes = build_progression(obs)
+        self.assertEqual([snapshot["severity"] for snapshot in snapshots], [3, 1])
+        self.assertEqual(snapshots[-1]["trend"], "improving")
+        self.assertEqual(changes.iloc[-1]["Severity"], SEVERITY_LABELS[1])
 
-    def test_progression_changes_yellow_orange_red(self) -> None:
-        observations = extract_observations(self.events, "Orthopedic")
-        snapshots, changes = build_progression(observations)
-
-        self.assertEqual(len(snapshots), 4)
-        neck_levels = [
-            snapshot["statuses"].get("neck", {}).get("level")
-            for snapshot in snapshots
-        ]
-        self.assertEqual(neck_levels[:3], [1, 2, 3])
-        self.assertNotIn("shoulder", snapshots[-1]["statuses"])
-        self.assertIn("Resolved", set(changes["New Status"]))
-
-    def test_manual_override_wins(self) -> None:
-        observations = extract_observations(self.events.iloc[:1], "Orthopedic")
-        observations.loc[observations["body_part"] == "neck", "override"] = (
-            "Severe injury"
+    def test_same_bucket_pain_change_still_sets_trend(self):
+        df = pd.DataFrame(
+            [
+                event("2024-01-01", "E1", "Emergency", "Neck", "Neck pain rated 9/10."),
+                event("2024-02-01", "E2", "Orthopedic", "Neck", "Neck pain rated 7/10."),
+            ]
         )
-        snapshots, _ = build_progression(observations)
-        self.assertEqual(snapshots[0]["statuses"]["neck"]["level"], 3)
+        snapshots, _ = build_progression(extract_observations(df, "neck"))
+        self.assertEqual([snapshot["severity"] for snapshot in snapshots], [3, 3])
+        self.assertEqual(snapshots[-1]["trend"], "improving")
+
+    def test_progression_spans_medicine_types_by_default(self):
+        df = pd.DataFrame(
+            [
+                event("2024-01-01", "E1", "Emergency", "Neck", "Neck pain rated 8/10."),
+                event(
+                    "2024-02-01",
+                    "E2",
+                    "Radiology",
+                    "Neck",
+                    "No cervical fracture. Neck pain rated 6/10.",
+                ),
+                event(
+                    "2024-03-01",
+                    "E3",
+                    "Physical Therapy",
+                    "Neck",
+                    "Neck pain rated 3/10 and improving.",
+                ),
+            ]
+        )
+        obs = extract_observations(df, "neck")
+        self.assertEqual(list(obs["event_id"]), ["E1", "E2", "E3"])
+        snapshots, _ = build_progression(obs)
+        self.assertEqual([snapshot["severity"] for snapshot in snapshots], [3, 2, 1])
+
+    def test_source_metadata_is_preserved(self):
+        df = pd.DataFrame(
+            [
+                event(
+                    "2024-01-01",
+                    "E000042",
+                    "Orthopedic",
+                    "Shoulder",
+                    "Shoulder pain rated 6/10.",
+                )
+            ]
+        )
+        obs = extract_observations(df, "shoulder")
+        self.assertEqual(obs.iloc[0]["event_id"], "E000042")
+        self.assertEqual(obs.iloc[0]["pdf_url"], "https://example.com/E000042.pdf")
+        snapshots, changes = build_progression(obs)
+        self.assertEqual(snapshots[0]["event_id"], "E000042")
+        self.assertEqual(changes.iloc[0]["Event ID"], "E000042")
+
+    def test_manual_override_wins(self):
+        df = pd.DataFrame(
+            [event("2024-01-01", "E1", "Orthopedic", "Neck", "Neck pain rated 2/10.")]
+        )
+        obs = extract_observations(df, "neck")
+        obs.loc[:, "severity_override"] = "Severe"
+        snapshots, _ = build_progression(obs)
+        self.assertEqual(snapshots[0]["severity"], 3)
+
+    def test_available_body_parts_are_canonical(self):
+        df = pd.DataFrame(
+            [
+                event(
+                    "2024-01-01",
+                    "E1",
+                    "Orthopedic",
+                    "L Shoulder, SI joint",
+                    "Left shoulder pain. SI joint pain.",
+                )
+            ]
+        )
+        self.assertEqual(available_body_parts(df), ["left shoulder", "sacrum"])
 
 
 if __name__ == "__main__":
