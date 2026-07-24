@@ -14,12 +14,7 @@ import pandas as pd
 from data_loader import split_multi_value
 
 SEVERITY_LABELS = {0: "Resolved", 1: "Mild", 2: "Moderate", 3: "Severe"}
-SEVERITY_COLORS = {
-    0: "#16a34a",
-    1: "#facc15",
-    2: "#f97316",
-    3: "#dc2626",
-}
+SEVERITY_COLORS = {0: "#16a34a", 1: "#facc15", 2: "#f97316", 3: "#dc2626"}
 TREND_LABELS = {
     "new": "New",
     "improving": "Improving",
@@ -40,15 +35,23 @@ TREND_SYMBOLS = {
 
 @dataclass(frozen=True)
 class BodyLocation:
-    """One marker position on the built-in front/back body map."""
-
     view: str
     x: float
     y: float
 
 
-# Coordinates are percentages within the individual front/back outline panels.
-# Unspecified paired body parts are intentionally shown on both sides.
+@dataclass(frozen=True)
+class Inference:
+    severity: int | None
+    trend_hint: str
+    pain_score: float | None
+    reason: str
+    matched_text: str
+    context_specific: bool
+    confidence: str
+    severity_basis: str
+
+
 BODY_COORDINATES: dict[str, list[BodyLocation]] = {
     "head": [BodyLocation("front", 50, 8)],
     "face": [BodyLocation("front", 50, 12)],
@@ -114,10 +117,7 @@ BODY_ALIASES: dict[str, tuple[str, ...]] = {
     "foot": ("foot", "feet", "heel", "toe", "toes"),
     "achilles": ("achilles", "achilles tendon"),
 }
-
-ALIAS_TO_BODY = {
-    alias: body for body, aliases in BODY_ALIASES.items() for alias in aliases
-}
+ALIAS_TO_BODY = {alias: body for body, aliases in BODY_ALIASES.items() for alias in aliases}
 SORTED_ALIASES = sorted(ALIAS_TO_BODY.items(), key=lambda item: len(item[0]), reverse=True)
 
 RESOLVED_PATTERNS = (
@@ -145,7 +145,6 @@ STABLE_PATTERNS = (
     (r"\bstable\b", "stable"),
     (r"\bno (?:significant )?change\b", "no significant change"),
 )
-
 SEVERE_PATTERNS = (
     (r"\bsevere(?:ly)?\b", "severe", "descriptor"),
     (r"\bexcruciating\b", "excruciating", "descriptor"),
@@ -174,7 +173,6 @@ MILD_PATTERNS = (
     (r"\bbruis(?:e[sd]?|ing)\b", "bruising", "generic_symptom"),
     (r"\bcontusion\b", "contusion", "generic_symptom"),
 )
-
 PAIN_SCORE_RE = re.compile(r"\b(10(?:\.0+)?|[0-9](?:\.\d+)?)\s*(?:/|out of)\s*10\b", re.I)
 
 BODY_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 374 568">
@@ -184,26 +182,12 @@ BODY_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 374 568">
 </g></svg>"""
 
 
-@dataclass(frozen=True)
-class Inference:
-    """Body-specific severity and trend evidence extracted from one event."""
-
-    severity: int | None
-    trend_hint: str
-    pain_score: float | None
-    reason: str
-    matched_text: str
-    context_specific: bool
-    confidence: str
-    severity_basis: str
-
-
 def _normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
 def _extract_side(value: str) -> tuple[str, str]:
-    """Extract common left/right notation without treating 'l-spine' as laterality."""
+    """Extract left/right notation without treating 'L spine' as left-sided anatomy."""
     text = _normalize_spaces(value.lower())
     side = ""
     left_prefix = re.search(r"^(?:l|lt)\s+(?!(?:spine|spinal)\b)(?=[a-z])", text)
@@ -219,21 +203,15 @@ def _extract_side(value: str) -> tuple[str, str]:
 
 
 def canonical_body_part(raw_part: str) -> str:
-    """Normalize body-part wording while preserving documented laterality."""
     side, value = _extract_side(str(raw_part))
     body = next(
-        (
-            canonical
-            for alias, canonical in SORTED_ALIASES
-            if re.search(rf"\b{re.escape(alias)}\b", value, re.I)
-        ),
+        (canonical for alias, canonical in SORTED_ALIASES if re.search(rf"\b{re.escape(alias)}\b", value, re.I)),
         value,
     )
     return f"{side} {body}".strip()
 
 
 def available_body_parts(df: pd.DataFrame) -> list[str]:
-    """Return canonical body parts present in a chronology."""
     parts: set[str] = set()
     if "body_parts" not in df.columns:
         return []
@@ -246,7 +224,6 @@ def available_body_parts(df: pd.DataFrame) -> list[str]:
 
 
 def marker_locations(body_part: str) -> list[BodyLocation]:
-    """Return front/back map locations; unknown anatomy returns no marker."""
     canonical = canonical_body_part(body_part)
     side = ""
     base = canonical
@@ -254,12 +231,9 @@ def marker_locations(body_part: str) -> list[BodyLocation]:
         side, base = "left", canonical[5:]
     elif canonical.startswith("right "):
         side, base = "right", canonical[6:]
-
     locations = BODY_COORDINATES.get(base, [])
     if not side or len(locations) <= 1:
         return locations
-
-    # Front view is mirrored to the viewer; back view is not.
     location_view = locations[0].view
     if side == "left":
         chooser = max if location_view == "front" else min
@@ -269,25 +243,15 @@ def marker_locations(body_part: str) -> list[BodyLocation]:
 
 
 def marker_coordinates(body_part: str) -> list[tuple[float, float]]:
-    """Compatibility helper used by tests and callers that only need x/y values."""
     return [(location.x, location.y) for location in marker_locations(body_part)]
 
 
 def _sentence_mentions_side(sentence: str, side: str) -> bool:
-    if side == "left":
-        return bool(re.search(r"\bleft\b|\blt\.?\b", sentence, re.I))
-    if side == "right":
-        return bool(re.search(r"\bright\b|\brt\.?\b", sentence, re.I))
-    return False
-
-
-def _sentence_mentions_opposite_side(sentence: str, side: str) -> bool:
-    opposite = "right" if side == "left" else "left"
-    return _sentence_mentions_side(sentence, opposite)
+    pattern = r"\bleft\b|\blt\.?\b" if side == "left" else r"\bright\b|\brt\.?\b"
+    return bool(re.search(pattern, sentence, re.I))
 
 
 def _relevant_context(summary: str, body_part: str) -> tuple[str, bool]:
-    """Return only sentences that mention this anatomy; never fall back to full text."""
     canonical = canonical_body_part(body_part)
     side = ""
     base = canonical
@@ -295,37 +259,28 @@ def _relevant_context(summary: str, body_part: str) -> tuple[str, bool]:
         side, base = "left", canonical[5:]
     elif canonical.startswith("right "):
         side, base = "right", canonical[6:]
-
     aliases = BODY_ALIASES.get(base, (base,))
-    sentences = [
-        sentence.strip()
-        for sentence in re.split(r"(?<=[.!?;])\s+|\n+", str(summary))
-        if sentence.strip()
-    ]
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?;])\s+|\n+", str(summary)) if s.strip()]
     matching = [
         sentence
         for sentence in sentences
         if any(re.search(rf"\b{re.escape(alias)}\b", sentence, re.I) for alias in aliases)
     ]
     if side and matching:
-        same_side = [sentence for sentence in matching if _sentence_mentions_side(sentence, side)]
+        same_side = [s for s in matching if _sentence_mentions_side(s, side)]
         if same_side:
             matching = same_side
         else:
-            matching = [
-                sentence for sentence in matching if not _sentence_mentions_opposite_side(sentence, side)
-            ]
-    if not matching:
-        return "", False
-    return " ".join(matching), True
+            opposite = "right" if side == "left" else "left"
+            matching = [s for s in matching if not _sentence_mentions_side(s, opposite)]
+    return (" ".join(matching), True) if matching else ("", False)
 
 
 def _is_negated(text: str, start: int, end: int) -> bool:
     before = text[max(0, start - 90) : start]
     after = text[end : min(len(text), end + 50)]
     before_negation = re.search(
-        r"\b(?:no|not|without|denies|denied|negative for|absence of|free of)"
-        r"(?:\W+\w+){0,6}\W*$",
+        r"\b(?:no|not|without|denies|denied|negative for|absence of|free of)(?:\W+\w+){0,6}\W*$",
         before,
         re.I,
     )
@@ -337,12 +292,7 @@ def _is_negated(text: str, start: int, end: int) -> bool:
     return bool(before_negation or after_negation)
 
 
-def _first_match(
-    text: str,
-    patterns: tuple[tuple[str, str], ...],
-    *,
-    allow_negated: bool = False,
-) -> tuple[str, str] | None:
+def _first_match(text: str, patterns, *, allow_negated: bool = False):
     for pattern, reason in patterns:
         for match in re.finditer(pattern, text, re.I):
             if allow_negated or not _is_negated(text, match.start(), match.end()):
@@ -350,10 +300,7 @@ def _first_match(
     return None
 
 
-def _severity_match(
-    text: str,
-    patterns: tuple[tuple[str, str, str], ...],
-) -> tuple[str, str, str] | None:
+def _severity_match(text: str, patterns):
     for pattern, reason, basis in patterns:
         for match in re.finditer(pattern, text, re.I):
             if not _is_negated(text, match.start(), match.end()):
@@ -365,9 +312,6 @@ def _extract_current_pain_score(text: str) -> tuple[float | None, str]:
     matches = list(PAIN_SCORE_RE.finditer(text))
     if not matches:
         return None, ""
-
-    # Prefer scores explicitly framed as current/today/now/reported/rated; otherwise
-    # use the first body-specific score rather than a later historical comparison.
     ranked: list[tuple[int, int, re.Match[str]]] = []
     for match in matches:
         before = text[max(0, match.start() - 36) : match.start()].lower()
@@ -379,9 +323,7 @@ def _extract_current_pain_score(text: str) -> tuple[float | None, str]:
         ranked.append((priority, -match.start(), match))
     _, _, chosen = max(ranked, key=lambda item: (item[0], item[1]))
     score = float(chosen.group(1))
-    if 0 <= score <= 10:
-        return score, chosen.group(0)
-    return None, ""
+    return (score, chosen.group(0)) if 0 <= score <= 10 else (None, "")
 
 
 def _pain_severity(score: float) -> int:
@@ -395,32 +337,13 @@ def _pain_severity(score: float) -> int:
 
 
 def infer_severity(summary: str, body_part: str) -> Inference:
-    """Infer body-specific severity and trend without borrowing unrelated sentences."""
     context, is_specific = _relevant_context(summary, body_part)
     if not is_specific:
-        return Inference(
-            severity=None,
-            trend_hint="unknown",
-            pain_score=None,
-            reason="body part listed, but no body-specific severity statement was found",
-            matched_text="",
-            context_specific=False,
-            confidence="Low",
-            severity_basis="none",
-        )
+        return Inference(None, "unknown", None, "body part listed, but no body-specific severity statement was found", "", False, "Low", "none")
 
     resolved = _first_match(context, RESOLVED_PATTERNS, allow_negated=True)
     if resolved:
-        return Inference(
-            severity=0,
-            trend_hint="resolved",
-            pain_score=0.0 if "0/10" in resolved[1] else None,
-            reason=resolved[0],
-            matched_text=context,
-            context_specific=True,
-            confidence="High",
-            severity_basis="resolved",
-        )
+        return Inference(0, "resolved", 0.0 if "0/10" in resolved[1] else None, resolved[0], context, True, "High", "resolved")
 
     improving = _first_match(context, IMPROVING_PATTERNS)
     worsening = _first_match(context, WORSENING_PATTERNS)
@@ -438,7 +361,6 @@ def infer_severity(summary: str, body_part: str) -> Inference:
     candidates: list[tuple[int, str, str]] = []
     if pain_score is not None:
         candidates.append((_pain_severity(pain_score), f"pain score {pain_score:g}/10", "pain_score"))
-
     for level, patterns in ((3, SEVERE_PATTERNS), (2, MODERATE_PATTERNS), (1, MILD_PATTERNS)):
         match = _severity_match(context, patterns)
         if match:
@@ -446,32 +368,14 @@ def infer_severity(summary: str, body_part: str) -> Inference:
 
     if not candidates:
         reason = trend_reason or "body-specific statement found, but severity is not explicit"
-        return Inference(
-            severity=None,
-            trend_hint=trend_hint,
-            pain_score=pain_score,
-            reason=reason,
-            matched_text=context,
-            context_specific=True,
-            confidence="Medium" if trend_hint != "unknown" else "Low",
-            severity_basis="none",
-        )
+        return Inference(None, trend_hint, pain_score, reason, context, True, "Medium" if trend_hint != "unknown" else "Low", "none")
 
     severity, severity_reason, basis = max(candidates, key=lambda item: item[0])
-    reason_parts = [severity_reason]
+    reasons = [severity_reason]
     if trend_reason and trend_reason != severity_reason:
-        reason_parts.append(trend_reason)
+        reasons.append(trend_reason)
     confidence = "High" if basis in {"pain_score", "descriptor", "structural", "resolved"} else "Medium"
-    return Inference(
-        severity=severity,
-        trend_hint=trend_hint,
-        pain_score=pain_score,
-        reason="; ".join(reason_parts),
-        matched_text=context,
-        context_specific=True,
-        confidence=confidence,
-        severity_basis=basis,
-    )
+    return Inference(severity, trend_hint, pain_score, "; ".join(reasons), context, True, confidence, basis)
 
 
 def extract_observations(
@@ -479,24 +383,21 @@ def extract_observations(
     body_part: str | None = None,
     medicine_types: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> pd.DataFrame:
-    """Create one auditable body-specific observation per source event."""
+    """Create one observation per matching encounter; multiple medicine types are kept together."""
     selected = df.copy()
     if medicine_types is not None:
-        allowed = set(medicine_types)
-        selected = selected[selected["medicine_type"].isin(allowed)]
+        selected = selected[selected["medicine_type"].isin(set(medicine_types))]
     selected = selected.sort_values(["encounter_date", "event_id"], ascending=True)
-
     selected_body = canonical_body_part(body_part) if body_part else None
     observations: list[dict[str, Any]] = []
     for event_order, (_, row) in enumerate(selected.iterrows()):
-        event_parts: set[str] = set()
-        for raw_part in split_multi_value(str(row.get("body_parts", "")), ","):
-            canonical = canonical_body_part(raw_part)
-            if canonical:
-                event_parts.add(canonical)
+        event_parts = {
+            canonical_body_part(raw)
+            for raw in split_multi_value(str(row.get("body_parts", "")), ",")
+            if canonical_body_part(raw)
+        }
         if selected_body:
             event_parts = {part for part in event_parts if part == selected_body}
-
         for part_order, canonical in enumerate(sorted(event_parts)):
             inference = infer_severity(str(row.get("summary", "")), canonical)
             event_id = str(row.get("event_id", f"event-{event_order}"))
@@ -530,40 +431,24 @@ def extract_observations(
 
 
 def _override_severity(value: str, suggested: int | None) -> int | None:
-    mapping = {
-        "Mild": 1,
-        "Moderate": 2,
-        "Severe": 3,
-        "Resolved": 0,
-        "No severity update": None,
-    }
-    return mapping.get(value, suggested)
+    if suggested is not None and pd.isna(suggested):
+        suggested = None
+    return {"Mild": 1, "Moderate": 2, "Severe": 3, "Resolved": 0, "No severity update": None}.get(value, suggested)
 
 
 def _override_trend(value: str, suggested: str) -> str:
-    mapping = {
-        "New": "new",
-        "Improving": "improving",
-        "Stable": "stable",
-        "Worsening": "worsening",
-        "Resolved": "resolved",
-        "Unknown": "unknown",
-    }
-    return mapping.get(value, suggested)
+    if suggested is None or str(suggested).lower() == "nan":
+        suggested = "unknown"
+    return {"New": "new", "Improving": "improving", "Stable": "stable", "Worsening": "worsening", "Resolved": "resolved", "Unknown": "unknown"}.get(value, suggested)
 
 
-def _trend_from_change(
-    previous_severity: int | None,
-    new_severity: int | None,
-    previous_pain: float | None,
-    new_pain: float | None,
-) -> str:
+def _trend_from_change(previous_severity, new_severity, previous_pain, new_pain) -> str:
     if previous_severity is None and new_severity not in (None, 0):
         return "new"
-    if previous_pain is not None and new_pain is not None:
-        if new_pain < previous_pain:
+    if previous_pain is not None and new_pain is not None and pd.notna(new_pain):
+        if float(new_pain) < float(previous_pain):
             return "improving"
-        if new_pain > previous_pain:
+        if float(new_pain) > float(previous_pain):
             return "worsening"
         return "stable"
     if previous_severity is not None and new_severity is not None:
@@ -576,14 +461,20 @@ def _trend_from_change(
 
 
 def build_progression(observations: pd.DataFrame) -> tuple[list[dict[str, Any]], pd.DataFrame]:
-    """Build event-level progression points with exact severity updates and independent trend."""
+    """Build one timeline point per encounter after severity is established.
+
+    Encounters are not dropped just because severity is unchanged. This keeps Emergency,
+    Radiology, Orthopedic, PT, and other selected medicine types in one continuous chronology.
+    When an encounter has no new severity evidence, the last established severity is carried
+    forward and marked as such rather than inventing a new severity estimate.
+    """
     if observations.empty:
         return [], pd.DataFrame()
 
     ordered = observations.sort_values(["encounter_date", "event_order", "event_id"])
     state: dict[str, dict[str, Any]] = {}
     snapshots: list[dict[str, Any]] = []
-    change_rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
 
     for _, observation in ordered.iterrows():
         body_part = str(observation["body_part"])
@@ -591,16 +482,10 @@ def build_progression(observations: pd.DataFrame) -> tuple[list[dict[str, Any]],
         previous_severity = previous.get("severity")
         previous_pain = previous.get("pain_score")
 
-        severity = _override_severity(
-            str(observation.get("severity_override", "Auto")),
-            observation.get("suggested_severity"),
-        )
-        suggested_trend = str(observation.get("suggested_trend", "unknown"))
-        trend = _override_trend(str(observation.get("trend_override", "Auto")), suggested_trend)
-
-        # A generic symptom can establish or increase severity, but it should not
-        # silently downgrade a prior stronger state without numeric/explicit evidence.
+        severity = _override_severity(str(observation.get("severity_override", "Auto")), observation.get("suggested_severity"))
+        trend = _override_trend(str(observation.get("trend_override", "Auto")), str(observation.get("suggested_trend", "unknown")))
         basis = str(observation.get("severity_basis", "none"))
+
         if (
             severity is not None
             and previous_severity is not None
@@ -617,65 +502,50 @@ def build_progression(observations: pd.DataFrame) -> tuple[list[dict[str, Any]],
         elif trend == "unknown":
             trend = _trend_from_change(previous_severity, severity, previous_pain, observation.get("pain_score"))
 
-        # Trend-only observations retain the prior severity rather than inventing one.
+        carried_forward = False
         effective_severity = severity
-        if effective_severity is None and previous_severity is not None and trend in {
-            "improving",
-            "stable",
-            "worsening",
-        }:
+        if effective_severity is None and previous_severity is not None:
             effective_severity = previous_severity
+            carried_forward = True
 
-        if effective_severity is None and previous_severity is None:
-            # Keep the low-confidence/unknown observation in the review table only.
+        if effective_severity is None:
             continue
 
         new_pain = observation.get("pain_score")
-        effective_pain = new_pain if pd.notna(new_pain) else previous_pain
-        severity_changed = effective_severity != previous_severity
-        pain_changed = (
-            new_pain is not None
-            and pd.notna(new_pain)
-            and previous_pain is not None
-            and float(new_pain) != float(previous_pain)
-        )
-        meaningful_trend = trend in {"new", "improving", "worsening", "resolved"}
-        first_known = previous_severity is None and effective_severity is not None
+        has_new_pain = new_pain is not None and pd.notna(new_pain)
+        effective_pain = float(new_pain) if has_new_pain else previous_pain
 
         if effective_severity == 0:
             state.pop(body_part, None)
         else:
-            state[body_part] = {
-                "severity": int(effective_severity),
-                "pain_score": effective_pain,
-            }
+            state[body_part] = {"severity": int(effective_severity), "pain_score": effective_pain}
 
-        if not (severity_changed or pain_changed or meaningful_trend or first_known):
-            continue
+        reason = str(observation.get("reason", ""))
+        if carried_forward:
+            reason = f"No new severity estimate in this encounter; carried forward {SEVERITY_LABELS[int(effective_severity)].lower()} severity from the prior record. {reason}".strip()
 
         severity_label = SEVERITY_LABELS[int(effective_severity)]
-        previous_label = (
-            SEVERITY_LABELS[int(previous_severity)] if previous_severity is not None else "Not established"
-        )
+        previous_label = SEVERITY_LABELS[int(previous_severity)] if previous_severity is not None else "Not established"
         snapshot = {
             "date": pd.Timestamp(observation["encounter_date"]),
             "body_part": body_part,
             "severity": int(effective_severity),
             "trend": trend,
-            "pain_score": float(new_pain) if new_pain is not None and pd.notna(new_pain) else None,
+            "pain_score": float(new_pain) if has_new_pain else None,
             "event_id": str(observation.get("event_id", "")),
             "medicine_type": str(observation.get("medicine_type", "")),
             "record_type": str(observation.get("record_type", "")),
             "primary_provider": str(observation.get("primary_provider", "")),
             "facility": str(observation.get("facility", "")),
             "pdf_url": str(observation.get("pdf_url", "")),
-            "reason": str(observation.get("reason", "")),
+            "reason": reason,
             "matched_text": str(observation.get("matched_text", "")),
             "confidence": str(observation.get("confidence", "")),
             "mapped": bool(observation.get("mapped", False)),
+            "carried_forward": carried_forward,
         }
         snapshots.append(snapshot)
-        change_rows.append(
+        rows.append(
             {
                 "Date": snapshot["date"],
                 "Event ID": snapshot["event_id"],
@@ -690,11 +560,12 @@ def build_progression(observations: pd.DataFrame) -> tuple[list[dict[str, Any]],
                 "Confidence": snapshot["confidence"],
                 "Evidence": snapshot["matched_text"],
                 "Reason": snapshot["reason"],
+                "Carried Forward": carried_forward,
                 "PDF": snapshot["pdf_url"],
             }
         )
 
-    return snapshots, pd.DataFrame(change_rows)
+    return snapshots, pd.DataFrame(rows)
 
 
 def _image_data_uri() -> str:
@@ -707,9 +578,7 @@ def _safe_url(value: str) -> str:
         parsed = urlparse(value)
     except ValueError:
         return ""
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
-        return value
-    return ""
+    return value if parsed.scheme in {"http", "https"} and parsed.netloc else ""
 
 
 def _marker_html(body_part: str, severity: int, tooltip: str) -> tuple[str, str]:
@@ -719,15 +588,15 @@ def _marker_html(body_part: str, severity: int, tooltip: str) -> tuple[str, str]
         color = SEVERITY_COLORS[severity]
         content = "✓" if severity == 0 else ""
         marker = (
-            f'<span class="marker severity-{severity}" style="left:{location.x}%;top:{location.y}%;'
-            f'background:{color}" title="{html.escape(tooltip, quote=True)}">{content}</span>'
+            f'<span class="marker" style="left:{location.x}%;top:{location.y}%;background:{color}" '
+            f'title="{html.escape(tooltip, quote=True)}">{content}</span>'
         )
         (front if location.view == "front" else back).append(marker)
     return "".join(front), "".join(back)
 
 
 def render_progression_html(snapshots: list[dict[str, Any]]) -> str:
-    """Render progression on a horizontally scrollable, date-proportional axis."""
+    """Render all selected encounters on one date-proportional multi-specialty timeline."""
     if not snapshots:
         return "<p>No progression points.</p>"
 
@@ -735,19 +604,21 @@ def render_progression_html(snapshots: list[dict[str, Any]]) -> str:
     dates = [pd.Timestamp(item["date"]) for item in ordered]
     min_date, max_date = min(dates), max(dates)
     span_days = max(1, (max_date - min_date).days)
-    canvas_width = max(1050, min(5200, 360 + span_days * 8))
+    canvas_width = max(1100, min(7000, max(420 + span_days * 8, 260 + len(ordered) * 190)))
     usable_width = canvas_width - 260
-    lane_count = 3
-    lane_height = 265
+    lane_count = 4
+    lane_height = 255
     axis_y = 28 + lane_count * lane_height
     canvas_height = axis_y + 80
-
     image_uri = _image_data_uri()
+
     points: list[str] = []
     for index, snapshot in enumerate(ordered):
         date = pd.Timestamp(snapshot["date"])
         day_offset = (date - min_date).days
-        x_pos = 130 + (day_offset / span_days) * usable_width if span_days else canvas_width / 2
+        date_x = 130 + (day_offset / span_days) * usable_width if span_days else canvas_width / 2
+        prior_same_date = sum(1 for prior in ordered[:index] if pd.Timestamp(prior["date"]).date() == date.date())
+        x_pos = min(canvas_width - 130, max(130, date_x + prior_same_date * 38))
         lane = index % lane_count
         top = 10 + lane * lane_height
         severity = int(snapshot["severity"])
@@ -756,10 +627,8 @@ def render_progression_html(snapshots: list[dict[str, Any]]) -> str:
         pain_label = f"{float(pain_score):g}/10" if pain_score is not None else "—"
         severity_label = SEVERITY_LABELS[severity]
         trend_label = TREND_LABELS.get(trend, trend.title())
-        tooltip = (
-            f"{snapshot['body_part'].title()} — {severity_label}; {trend_label}. "
-            f"{snapshot.get('reason', '')}"
-        )
+        medicine_type = html.escape(str(snapshot.get("medicine_type", ""))) or "Unspecified"
+        tooltip = f"{snapshot['body_part'].title()} — {severity_label}; {trend_label}. {snapshot.get('reason', '')}"
         front_markers, back_markers = _marker_html(snapshot["body_part"], severity, tooltip)
         mapped_note = "" if snapshot.get("mapped") else '<div class="unmapped">Unmapped anatomy — no body marker</div>'
         source_url = _safe_url(str(snapshot.get("pdf_url", "")))
@@ -768,9 +637,11 @@ def render_progression_html(snapshots: list[dict[str, Any]]) -> str:
             if source_url
             else ""
         )
+        carried = '<span class="carried">carried forward</span>' if snapshot.get("carried_forward") else ""
         evidence = html.escape(str(snapshot.get("matched_text", "")))
         points.append(
             f'<div class="timepoint" style="left:{x_pos:.1f}px;top:{top}px">'
+            f'<div class="medicine-badge">{medicine_type}</div>'
             '<div class="body-pair">'
             f'<div class="body-panel"><div class="view-label">Front</div><img src="{image_uri}" alt="Front body outline"/>{front_markers}</div>'
             f'<div class="body-panel"><div class="view-label">Back</div><img src="{image_uri}" alt="Back body outline"/>{back_markers}</div>'
@@ -778,27 +649,30 @@ def render_progression_html(snapshots: list[dict[str, Any]]) -> str:
             f'<div class="date">{date.strftime("%b %d, %Y")}</div>'
             f'<div class="status"><strong>{severity_label}</strong> <span class="trend">{TREND_SYMBOLS.get(trend, "?")} {trend_label}</span></div>'
             f'<div class="meta">Pain: {pain_label} · {html.escape(str(snapshot.get("event_id", "")))}</div>'
-            f'<div class="meta">{html.escape(str(snapshot.get("medicine_type", "")))}</div>'
-            f'{mapped_note}{source_link}'
-            f'<div class="evidence" title="{html.escape(evidence, quote=True)}">{evidence[:150]}{"…" if len(evidence) > 150 else ""}</div>'
+            f'{carried}{mapped_note}{source_link}'
+            f'<div class="evidence" title="{html.escape(evidence, quote=True)}">{evidence[:140]}{"…" if len(evidence) > 140 else ""}</div>'
             '</div>'
-            f'<div class="stem" style="left:{x_pos:.1f}px;top:{top + 238}px;height:{max(12, axis_y - (top + 238))}px"></div>'
+            f'<div class="stem" style="left:{x_pos:.1f}px;top:{top + 232}px;height:{max(12, axis_y - (top + 232))}px"></div>'
             f'<div class="axis-tick" style="left:{x_pos:.1f}px;top:{axis_y - 5}px"></div>'
         )
 
+    medicine_types = sorted({str(item.get("medicine_type", "")).strip() or "Unspecified" for item in ordered})
+    medicine_summary = " · ".join(html.escape(value) for value in medicine_types)
     return f"""<!doctype html>
 <html><head><style>
 * {{ box-sizing:border-box; }}
 body {{ margin:0; color:#1f2937; font-family:Arial,sans-serif; background:white; }}
-.legend {{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin:4px 8px 12px; font-size:13px; }}
+.legend {{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin:4px 8px 7px; font-size:13px; }}
+.specialties {{ margin:0 8px 12px; font-size:12px; color:#475569; }}
 .legend-item {{ display:flex; align-items:center; gap:5px; }}
 .swatch {{ width:13px; height:13px; border-radius:50%; border:1px solid rgba(0,0,0,.3); }}
 .scroll {{ overflow-x:auto; overflow-y:hidden; padding:4px 8px 16px; }}
 .canvas {{ position:relative; width:{canvas_width}px; height:{canvas_height}px; min-width:{canvas_width}px; }}
 .axis {{ position:absolute; left:20px; right:20px; top:{axis_y}px; height:3px; background:#64748b; }}
-.timepoint {{ position:absolute; width:220px; height:238px; transform:translateX(-50%); text-align:center; background:#fff; border:1px solid #dbe3ec; border-radius:10px; padding:5px 7px 7px; box-shadow:0 1px 5px rgba(15,23,42,.12); z-index:2; }}
-.body-pair {{ display:flex; justify-content:center; gap:3px; height:132px; }}
-.body-panel {{ width:82px; height:128px; position:relative; }}
+.timepoint {{ position:absolute; width:220px; min-height:232px; transform:translateX(-50%); text-align:center; background:#fff; border:1px solid #dbe3ec; border-radius:10px; padding:5px 7px 7px; box-shadow:0 1px 5px rgba(15,23,42,.12); z-index:2; }}
+.medicine-badge {{ font-size:10px; font-weight:700; color:#334155; background:#eef2f7; border-radius:8px; padding:2px 6px; margin:0 auto 2px; max-width:190px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.body-pair {{ display:flex; justify-content:center; gap:3px; height:126px; }}
+.body-panel {{ width:80px; height:124px; position:relative; }}
 .view-label {{ position:absolute; top:0; left:0; right:0; text-align:center; font-size:9px; color:#64748b; z-index:3; }}
 .body-panel img {{ width:100%; height:100%; object-fit:contain; display:block; }}
 .marker {{ position:absolute; width:16px; height:16px; border-radius:50%; transform:translate(-50%,-50%); border:2px solid rgba(255,255,255,.95); box-shadow:0 0 0 1px rgba(0,0,0,.55); color:white; font-size:11px; line-height:12px; font-weight:700; cursor:help; z-index:4; }}
@@ -806,6 +680,7 @@ body {{ margin:0; color:#1f2937; font-family:Arial,sans-serif; background:white;
 .status {{ font-size:12px; margin-top:2px; }}
 .trend {{ margin-left:5px; color:#334155; }}
 .meta {{ font-size:10.5px; color:#64748b; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.carried {{ display:inline-block; font-size:9px; color:#475569; background:#f1f5f9; border-radius:7px; padding:1px 5px; margin-right:4px; }}
 .unmapped {{ font-size:10px; color:#b45309; font-weight:700; }}
 .source-link {{ font-size:10.5px; margin-right:6px; }}
 .evidence {{ font-size:9.5px; color:#475569; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
@@ -820,5 +695,6 @@ body {{ margin:0; color:#1f2937; font-family:Arial,sans-serif; background:white;
   <span class="legend-item"><span class="swatch" style="background:{SEVERITY_COLORS[0]}"></span>Resolved</span>
   <span class="legend-item"><strong>Trend:</strong> ↑ worsening · → stable · ↓ improving · ✓ resolved</span>
 </div>
+<div class="specialties"><strong>Medicine types in this progression:</strong> {medicine_summary}</div>
 <div class="scroll"><div class="canvas"><div class="axis"></div>{"".join(points)}</div></div>
 </body></html>"""
