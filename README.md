@@ -1,25 +1,24 @@
 # Medical Records Streamlit App
 
-Streamlit webapp for personal injury lawyers to visualize and summarize medical chronology events from Excel.
+Streamlit webapp for personal injury lawyers to visualize, search, and summarize medical chronology events from Excel.
 
 ## Features
 
 - **Drag-and-drop upload** — drop an xlsx file to load data immediately
 - Extracts embedded PDF hyperlinks from Excel cells
 - Filterable sidebar: date range, record type, medicine type, facility, provider, body parts, and free-text search
-- **Table** view with event IDs, truncated narratives, and CSV export
+- **Table** view with stable event IDs, truncated narratives, and CSV export
 - **Timeline** view grouped by encounter date with full narratives and PDF links
 - **Charts** view for plotting selected event fields over time
-- **Summary** view using a MedGemma inference endpoint
-- Stable event-level citations such as `[E000123]` for checking generated claims against source records
-- Hierarchical chunk-and-synthesize summarization for larger chronologies
+- **Summary** view using `Falconsai/medical_summarization` through the Hugging Face serverless Inference API
+- Recursive chunk-and-summarize handling for chronologies larger than the model input window
 
 ## Project Structure
 
 ```text
 ├── app.py                 # Main Streamlit UI
 ├── data_loader.py         # xlsx parsing + normalization + stable event IDs
-├── summarizer.py          # grounded hierarchical LLM summarization
+├── summarizer.py          # Hugging Face medical summarization adapter
 ├── drive_client.py        # optional Google Drive download logic
 ├── requirements.txt
 ├── .streamlit/
@@ -52,35 +51,39 @@ Open `http://localhost:8501` and upload a medical chronology `.xlsx` file.
 | Summary | Clinical narrative |
 | Link To Pdf | Cell text with hyperlink URL |
 
-Each source row receives a stable event ID based on its Excel row number. Generated summaries are instructed to cite these IDs so claims can be checked against the table/timeline and original PDF.
+Each source row receives a stable event ID based on its Excel row number. These IDs remain visible in the table and timeline so a generated summary can be checked against the source records.
 
-## MedGemma Summarization
+## Medical Summarization
 
-The Streamlit process does **not** load a 4B model into memory. Instead it calls a private Hugging Face Inference Endpoint running `google/medgemma-4b-it` (or another OpenAI-compatible model endpoint).
+The demo uses the Apache-2.0 `Falconsai/medical_summarization` model through Hugging Face's hosted `hf-inference` provider. The Streamlit app therefore does not load or host a language model itself and no dedicated GPU endpoint is required.
 
-Create the endpoint in Hugging Face, then configure local `.streamlit/secrets.toml` or Streamlit Community Cloud **Settings → Secrets**:
+### 1. Create a Hugging Face token
+
+Create a Hugging Face access token with permission to use Inference Providers.
+
+### 2. Add the token to Streamlit secrets
+
+For local development, create `.streamlit/secrets.toml`. In Streamlit Community Cloud, open **App settings → Secrets**.
 
 ```toml
-[summarization]
-endpoint_url = "https://YOUR-ENDPOINT.endpoints.huggingface.cloud"
+[huggingface]
 api_token = "hf_YOUR_TOKEN"
 ```
 
-The Hugging Face `InferenceClient` automatically uses the endpoint's chat-completions interface.
+Do not commit this token to GitHub.
 
 ### Summary behavior
 
-The Summary tab operates on the events selected by the existing sidebar filters. The prompt requires the model to:
+The Summary tab sends the events selected by the existing sidebar filters to the summarizer. Because the model has a relatively small input window, the application:
 
-- use only supplied record facts
-- preserve chronology
-- avoid inferring diagnoses, causes, treatment rationale, or outcomes
-- cite factual statements with event IDs
-- explicitly report conflicts or unknown information
+1. orders the selected events chronologically;
+2. divides the record text into conservative model-sized chunks;
+3. summarizes each chunk through Hugging Face Inference;
+4. recursively summarizes the intermediate results until one summary remains.
 
-For larger selections, events are divided into chronological chunks, summarized separately, and then synthesized into a final longitudinal summary while retaining event citations.
+This is intentionally a lightweight demo architecture. `Falconsai/medical_summarization` is a task-specific summarization model rather than an instruction-following medical LLM, so the application does not claim sentence-level citations, diagnosis reasoning, or medical advice. The Summary tab displays the exact source events used so the output can be manually checked.
 
-Generated summaries still require human review. The citation mechanism improves traceability but does not guarantee factual correctness.
+For large chronologies, narrow the event selection with the sidebar filters before generating a summary. This reduces inference calls and usually produces a more focused result.
 
 ## Deploy to Streamlit Community Cloud
 
@@ -90,10 +93,10 @@ Generated summaries still require human review. The citation mechanism improves 
    - **Repository:** `BaylorBrangers/Swans_Hackathon`
    - **Branch:** your deployment branch
    - **Main file path:** `app.py`
-4. Add the `[summarization]` secrets above if you want summary generation enabled.
+4. Add the `[huggingface]` secret shown above.
 5. Deploy.
 
-Without summarization secrets, upload/search/timeline/chart functionality still works; the Summary tab displays configuration instructions instead of calling a model.
+Without the Hugging Face token, upload/search/timeline/chart functionality still works; the Summary tab displays configuration instructions instead of calling the model.
 
 ## Google Drive Setup (Optional)
 
@@ -102,6 +105,6 @@ Without summarization secrets, upload/search/timeline/chart functionality still 
 ## Security
 
 - Never commit Hugging Face tokens, Google credentials, or `.streamlit/secrets.toml`.
-- Uploaded medical records and selected event text are sent to the configured inference endpoint when a summary is generated.
-- For identifiable health information, use infrastructure and contractual controls appropriate to the data and applicable privacy requirements; do not assume a default public/serverless endpoint is suitable.
-- Generated text is for record review, not medical advice.
+- When a summary is generated, selected medical-record text is sent to Hugging Face's hosted inference service.
+- Use synthetic or appropriately de-identified data for this demo unless you have confirmed that the chosen infrastructure and agreements are appropriate for identifiable health information.
+- Generated summaries can omit or misstate information and must be checked against the source records.
