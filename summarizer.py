@@ -57,28 +57,35 @@ def _split_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
     return chunks
 
 
-def _chunk_events(df: pd.DataFrame) -> list[str]:
-    """Group chronology events into model-sized chronological text chunks."""
+def _pack_texts(texts: list[str], max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+    """Pack multiple texts into bounded chunks while preserving order."""
     pieces: list[str] = []
-    ordered = df.sort_values("encounter_date", ascending=True)
-    for _, row in ordered.iterrows():
-        pieces.extend(_split_text(_event_text(row)))
+    for text in texts:
+        pieces.extend(_split_text(text, max_chars=max_chars))
 
     chunks: list[str] = []
     current: list[str] = []
     current_chars = 0
     for piece in pieces:
         separator_chars = 2 if current else 0
-        if current and current_chars + separator_chars + len(piece) > MAX_CHUNK_CHARS:
+        if current and current_chars + separator_chars + len(piece) > max_chars:
             chunks.append("\n\n".join(current))
             current = []
             current_chars = 0
+            separator_chars = 0
         current.append(piece)
         current_chars += separator_chars + len(piece)
 
     if current:
         chunks.append("\n\n".join(current))
     return chunks
+
+
+def _chunk_events(df: pd.DataFrame) -> list[str]:
+    """Group chronology events into model-sized chronological text chunks."""
+    ordered = df.sort_values("encounter_date", ascending=True)
+    event_texts = [_event_text(row) for _, row in ordered.iterrows()]
+    return _pack_texts(event_texts)
 
 
 def _summarize_text(client: InferenceClient, text: str) -> str:
@@ -105,19 +112,18 @@ def _reduce_summaries(client: InferenceClient, summaries: list[str]) -> str:
         if len(current) == 1:
             return current[0]
 
-        combined = "\n\n".join(current)
-        chunks = _split_text(combined)
-        next_round = [_summarize_text(client, chunk) for chunk in chunks]
+        packed = _pack_texts(current)
+        next_round = [_summarize_text(client, chunk) for chunk in packed]
 
-        # Guard against a pathological case where reduction does not shrink the
-        # number of chunks. Join adjacent summaries before trying again.
+        # Normally packing several short summaries into each request reduces the
+        # list immediately. If every summary is already near the input limit,
+        # force progress by combining pairs and allowing the next pass to re-split.
         if len(next_round) >= len(current) and len(next_round) > 1:
-            paired: list[str] = []
-            for index in range(0, len(next_round), 2):
-                paired.append(" ".join(next_round[index : index + 2]))
-            current = paired
-        else:
-            current = next_round
+            next_round = [
+                " ".join(next_round[index : index + 2])
+                for index in range(0, len(next_round), 2)
+            ]
+        current = next_round
 
     return "\n\n".join(current)
 
