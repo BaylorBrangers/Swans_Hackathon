@@ -14,6 +14,7 @@ from injury_progression import (
     extract_observations,
     infer_severity,
     marker_locations,
+    render_progression_html,
 )
 
 
@@ -44,8 +45,9 @@ class SeverityInferenceTests(unittest.TestCase):
         self.assertEqual(result.severity, 1)
 
     def test_no_cross_body_contamination(self):
-        summary = "Severe neck pain rated 9/10. Hand imaging was unremarkable."
-        hand = infer_severity(summary, "hand")
+        hand = infer_severity(
+            "Severe neck pain rated 9/10. Hand imaging was unremarkable.", "hand"
+        )
         self.assertIsNone(hand.severity)
         self.assertEqual(hand.confidence, "Low")
 
@@ -72,7 +74,6 @@ class SeverityInferenceTests(unittest.TestCase):
         self.assertEqual(len(left), 1)
         self.assertEqual(len(right), 1)
         self.assertNotEqual(left[0].x, right[0].x)
-
         left_back = marker_locations("left scapula")
         right_back = marker_locations("right scapula")
         self.assertLess(left_back[0].x, right_back[0].x)
@@ -94,8 +95,7 @@ class ProgressionTests(unittest.TestCase):
                 event("2024-02-01", "E2", "Orthopedic", "Neck", "Neck pain rated 3/10."),
             ]
         )
-        obs = extract_observations(df, "neck")
-        snapshots, changes = build_progression(obs)
+        snapshots, changes = build_progression(extract_observations(df, "neck"))
         self.assertEqual([snapshot["severity"] for snapshot in snapshots], [3, 1])
         self.assertEqual(snapshots[-1]["trend"], "improving")
         self.assertEqual(changes.iloc[-1]["Severity"], SEVERITY_LABELS[1])
@@ -131,10 +131,94 @@ class ProgressionTests(unittest.TestCase):
                 ),
             ]
         )
-        obs = extract_observations(df, "neck")
-        self.assertEqual(list(obs["event_id"]), ["E1", "E2", "E3"])
-        snapshots, _ = build_progression(obs)
+        observations = extract_observations(df, "neck")
+        self.assertEqual(list(observations["event_id"]), ["E1", "E2", "E3"])
+        snapshots, _ = build_progression(observations)
         self.assertEqual([snapshot["severity"] for snapshot in snapshots], [3, 2, 1])
+        self.assertEqual(
+            [snapshot["medicine_type"] for snapshot in snapshots],
+            ["Emergency", "Radiology", "Physical Therapy"],
+        )
+
+    def test_unchanged_cross_specialty_encounters_are_not_dropped(self):
+        df = pd.DataFrame(
+            [
+                event("2024-01-01", "E1", "Emergency", "Neck", "Neck pain rated 6/10."),
+                event(
+                    "2024-01-10",
+                    "E2",
+                    "Radiology",
+                    "Neck",
+                    "Cervical imaging shows no fracture.",
+                ),
+                event(
+                    "2024-01-20",
+                    "E3",
+                    "Orthopedic",
+                    "Neck",
+                    "Neck pain rated 6/10 and unchanged.",
+                ),
+                event(
+                    "2024-02-01",
+                    "E4",
+                    "Physical Therapy",
+                    "Neck",
+                    "Neck pain remains 6/10.",
+                ),
+            ]
+        )
+        snapshots, changes = build_progression(extract_observations(df, "neck"))
+        self.assertEqual(len(snapshots), 4)
+        self.assertEqual(
+            [snapshot["medicine_type"] for snapshot in snapshots],
+            ["Emergency", "Radiology", "Orthopedic", "Physical Therapy"],
+        )
+        self.assertTrue(snapshots[1]["carried_forward"])
+        self.assertTrue(changes.iloc[1]["Carried Forward"])
+
+    def test_multiple_medicine_types_can_be_selected_together(self):
+        df = pd.DataFrame(
+            [
+                event("2024-01-01", "E1", "Emergency", "Neck", "Neck pain rated 8/10."),
+                event("2024-02-01", "E2", "Radiology", "Neck", "Neck pain rated 6/10."),
+                event("2024-03-01", "E3", "Physical Therapy", "Neck", "Neck pain rated 3/10."),
+            ]
+        )
+        observations = extract_observations(
+            df,
+            "neck",
+            medicine_types=["Emergency", "Physical Therapy"],
+        )
+        self.assertEqual(
+            list(observations["medicine_type"]),
+            ["Emergency", "Physical Therapy"],
+        )
+        snapshots, _ = build_progression(observations)
+        self.assertEqual(
+            [snapshot["medicine_type"] for snapshot in snapshots],
+            ["Emergency", "Physical Therapy"],
+        )
+
+    def test_html_lists_all_medicine_types(self):
+        df = pd.DataFrame(
+            [
+                event("2024-01-01", "E1", "Emergency", "Neck", "Neck pain rated 8/10."),
+                event(
+                    "2024-01-10",
+                    "E2",
+                    "Radiology",
+                    "Neck",
+                    "Cervical imaging shows no fracture.",
+                ),
+                event("2024-02-01", "E3", "Physical Therapy", "Neck", "Neck pain rated 4/10."),
+            ]
+        )
+        snapshots, _ = build_progression(extract_observations(df, "neck"))
+        output = render_progression_html(snapshots)
+        self.assertIn("Emergency", output)
+        self.assertIn("Radiology", output)
+        self.assertIn("Physical Therapy", output)
+        self.assertIn("Medicine types in this progression", output)
 
     def test_source_metadata_is_preserved(self):
         df = pd.DataFrame(
@@ -148,10 +232,10 @@ class ProgressionTests(unittest.TestCase):
                 )
             ]
         )
-        obs = extract_observations(df, "shoulder")
-        self.assertEqual(obs.iloc[0]["event_id"], "E000042")
-        self.assertEqual(obs.iloc[0]["pdf_url"], "https://example.com/E000042.pdf")
-        snapshots, changes = build_progression(obs)
+        observations = extract_observations(df, "shoulder")
+        self.assertEqual(observations.iloc[0]["event_id"], "E000042")
+        self.assertEqual(observations.iloc[0]["pdf_url"], "https://example.com/E000042.pdf")
+        snapshots, changes = build_progression(observations)
         self.assertEqual(snapshots[0]["event_id"], "E000042")
         self.assertEqual(changes.iloc[0]["Event ID"], "E000042")
 
@@ -159,9 +243,9 @@ class ProgressionTests(unittest.TestCase):
         df = pd.DataFrame(
             [event("2024-01-01", "E1", "Orthopedic", "Neck", "Neck pain rated 2/10.")]
         )
-        obs = extract_observations(df, "neck")
-        obs.loc[:, "severity_override"] = "Severe"
-        snapshots, _ = build_progression(obs)
+        observations = extract_observations(df, "neck")
+        observations.loc[:, "severity_override"] = "Severe"
+        snapshots, _ = build_progression(observations)
         self.assertEqual(snapshots[0]["severity"], 3)
 
     def test_available_body_parts_are_canonical(self):
