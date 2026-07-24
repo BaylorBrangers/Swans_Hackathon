@@ -4,3 +4,4 @@ openpyxl>=3.1
 google-api-python-client>=2.100
 google-auth>=2.23
 huggingface_hub>=0.33
+plotly>=5.20
