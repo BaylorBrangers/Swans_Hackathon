@@ -38,12 +38,11 @@ def _extract_hyperlinks(worksheet) -> list[str | None]:
         cell = worksheet.cell(row=row_idx, column=link_col_idx)
         hyperlink = cell.hyperlink.target if cell.hyperlink else None
         urls.append(hyperlink)
-
     return urls
 
 
 def load_chronology_from_bytes(xlsx_bytes: bytes) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Load xlsx bytes into a normalized DataFrame with pdf_url hyperlinks."""
+    """Load xlsx bytes into a normalized DataFrame with stable event IDs."""
     workbook = load_workbook(BytesIO(xlsx_bytes), data_only=True)
     worksheet = workbook.active
 
@@ -60,6 +59,10 @@ def load_chronology_from_bytes(xlsx_bytes: bytes) -> tuple[pd.DataFrame, dict[st
     df = df.rename(columns=COLUMN_MAP)
     df["pdf_url"] = pdf_urls[: len(df)]
 
+    # Keep citations stable across filtering/sorting by tying the ID to the Excel row.
+    df["source_row"] = df.index + 2
+    df["event_id"] = df["source_row"].map(lambda row: f"E{row:06d}")
+
     stats: dict[str, Any] = {"total_rows": len(df), "skipped_rows": 0}
 
     df["encounter_date"] = pd.to_datetime(df["encounter_date"], errors="coerce")
@@ -67,7 +70,14 @@ def load_chronology_from_bytes(xlsx_bytes: bytes) -> tuple[pd.DataFrame, dict[st
     stats["skipped_rows"] = int(invalid_mask.sum())
     df = df.loc[~invalid_mask].copy()
 
-    for col in ("primary_provider", "facility", "body_parts", "medicine_type", "record_type", "summary"):
+    for col in (
+        "primary_provider",
+        "facility",
+        "body_parts",
+        "medicine_type",
+        "record_type",
+        "summary",
+    ):
         df[col] = df[col].fillna("").astype(str).str.strip()
 
     df["pdf_url"] = df["pdf_url"].fillna("").astype(str).str.strip()
