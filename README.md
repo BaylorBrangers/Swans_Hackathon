@@ -9,18 +9,23 @@ Streamlit webapp for personal injury lawyers to visualize, search, and summarize
 - Filterable sidebar: date range, record type, medicine type, facility, provider, body parts, and free-text search
 - **Table** view with stable event IDs, truncated narratives, and CSV export
 - **Timeline** view grouped by encounter date with full narratives and PDF links
-- **Charts** view for plotting selected event fields over time
+- **Charts** view for plotting selected record types, medicine types, facilities, providers, or body parts by day, week, or month
+- **Injury Progression** view with source-linked front/back body maps, separate severity and trend, confidence review, and manual overrides
+- Google Drive auto-load (optional, configure later via Streamlit secrets)
 - **Summary** view using `Falconsai/medical_summarization` through the Hugging Face serverless Inference API
 - Recursive chunk-and-summarize handling for chronologies larger than the model input window
 
 ## Project Structure
 
 ```text
-├── app.py                 # Main Streamlit UI
-├── data_loader.py         # xlsx parsing + normalization + stable event IDs
-├── summarizer.py          # Hugging Face medical summarization adapter
-├── drive_client.py        # optional Google Drive download logic
+├── app.py                         # Main Streamlit UI
+├── data_loader.py                 # xlsx parsing + normalization + stable event IDs
+├── injury_progression.py          # deterministic injury severity/trend inference + body-map timeline
+├── summarizer.py                  # Hugging Face medical summarization adapter
+├── drive_client.py                # optional Google Drive download logic
 ├── requirements.txt
+├── tests/
+│   └── test_injury_progression.py
 ├── .streamlit/
 │   └── config.toml
 └── scripts/
@@ -51,7 +56,7 @@ Open `http://localhost:8501` and upload a medical chronology `.xlsx` file.
 | Summary | Clinical narrative |
 | Link To Pdf | Cell text with hyperlink URL |
 
-Each source row receives a stable event ID based on its Excel row number. These IDs remain visible in the table and timeline so a generated summary can be checked against the source records.
+Each source row receives a stable event ID based on its Excel row number. These IDs remain visible in the table and timeline so generated outputs can be checked against the source records.
 
 ## Medical Summarization
 
@@ -84,6 +89,28 @@ The Summary tab sends the events selected by the existing sidebar filters to the
 This is intentionally a lightweight demo architecture. `Falconsai/medical_summarization` is a task-specific summarization model rather than an instruction-following medical LLM, so the application does not claim sentence-level citations, diagnosis reasoning, or medical advice. The Summary tab displays the exact source events used so the output can be manually checked.
 
 For large chronologies, narrow the event selection with the sidebar filters before generating a summary. This reduces inference calls and usually produces a more focused result.
+
+## Injury Progression
+
+The **Injury Progression** tab is designed as an auditable chronology aid rather than a clinical scoring system.
+
+1. Choose whether to analyze the **entire chronology** or only the **currently filtered records**. Entire chronology is the default so a text, provider, or facility filter does not silently remove later improvement or resolution records.
+2. Select the **body part** to follow. All medicine types are selected by default, and multiple medicine types can be included simultaneously so emergency, radiology, orthopedics, physical therapy, and other records form one continuous progression.
+3. Every selected encounter for that body part remains on the timeline after severity has been established, even when the encounter does not change the severity score. If a later record has no new severity estimate, the prior severity is carried forward and explicitly labeled as carried forward instead of dropping that specialty from the progression.
+4. Severity and trend are inferred separately from body-specific sentences:
+   - **Mild**: pain score 1–3/10 or mild/generic symptom evidence
+   - **Moderate**: pain score 4–6/10 or moderate/functional findings such as limited range of motion or swelling
+   - **Severe**: pain score 7–10/10 or strong findings such as severe symptoms, fracture, dislocation, rupture, or neurological deficit
+   - **Trend**: new, improving, stable, worsening, resolved, or unknown
+5. Numeric change is compared across events. For example, 9/10 → 7/10 remains severe but is marked **improving**, while 9/10 → 3/10 changes from severe to mild and is also marked improving.
+6. The inference engine uses only sentences that mention the selected anatomy. If the spreadsheet lists a body part but the summary has no body-specific severity statement, the result remains **Unknown / low confidence** instead of borrowing severity language from another injury.
+7. Negated findings such as “no fracture” are excluded from positive severity evidence.
+8. Front and back body maps are separate. Unrecognized anatomy is reported as unmapped rather than being silently placed at a default torso coordinate.
+9. Timeline spacing is proportional to elapsed time, every card identifies its medicine type, and each progression point carries the stable event ID plus a source PDF link when available.
+
+Expand **Review and correct inferred progression** to inspect the event ID, date, provider, facility, medicine type, pain score, confidence, matched evidence, and inference reason. Severity and trend can each be manually overridden before the figure is used.
+
+The keyword/rule-based inference is intentionally deterministic and explainable, but it can still miss context or unusual terminology. Review inferred results against the underlying medical records.
 
 ## Deploy to Streamlit Community Cloud
 

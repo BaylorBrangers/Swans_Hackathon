@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from data_loader import (
     load_chronology_from_bytes,
     split_multi_value,
     unique_body_parts,
     unique_providers,
+)
+from injury_progression import (
+    SEVERITY_LABELS,
+    TREND_LABELS,
+    available_body_parts,
+    build_progression,
+    extract_observations,
+    marker_locations,
+    render_progression_html,
 )
 from summarizer import DEFAULT_MODEL, summarize_events
 
@@ -351,6 +361,347 @@ def render_chart_view(df: pd.DataFrame) -> None:
         )
 
 
+def render_injury_summary_chart(source_df: pd.DataFrame, scope_label: str) -> None:
+    """Plot inferred injury severity over time for multiple body parts at once."""
+    all_observations = extract_observations(source_df)
+    if all_observations.empty:
+        st.info("No body-part observations are available for the summary chart.")
+        return
+
+    snapshots, _ = build_progression(all_observations)
+    if not snapshots:
+        st.info("No sufficiently specific injury severity data are available for the summary chart.")
+        return
+
+    summary_df = pd.DataFrame(
+        [
+            {
+                "Date": pd.Timestamp(snapshot["date"]),
+                "Body Part": str(snapshot["body_part"]).title(),
+                "Severity": int(snapshot["severity"]),
+                "Trend": TREND_LABELS.get(
+                    str(snapshot["trend"]), str(snapshot["trend"]).title()
+                ),
+                "Medicine Type": str(snapshot.get("medicine_type", "")),
+                "Event ID": str(snapshot.get("event_id", "")),
+                "Carried Forward": bool(snapshot.get("carried_forward", False)),
+            }
+            for snapshot in snapshots
+        ]
+    ).sort_values(["Date", "Event ID"])
+
+    # Multiple encounters can occur for the same body part on the same date. For the
+    # line graph, use the last chronological state for that date while retaining the
+    # complete event-level progression in the detailed view below.
+    summary_df = (
+        summary_df.groupby(["Date", "Body Part"], as_index=False, sort=True)
+        .agg(
+            Severity=("Severity", "last"),
+            Trend=("Trend", "last"),
+            **{
+                "Medicine Types": (
+                    "Medicine Type",
+                    lambda values: ", ".join(
+                        dict.fromkeys(value for value in values if value)
+                    ),
+                ),
+                "Event IDs": (
+                    "Event ID",
+                    lambda values: ", ".join(
+                        dict.fromkeys(value for value in values if value)
+                    ),
+                ),
+                "Carried Forward": ("Carried Forward", "max"),
+            },
+        )
+    )
+
+    counts = summary_df["Body Part"].value_counts()
+    body_options = counts.index.tolist()
+    default_parts = body_options[: min(8, len(body_options))]
+    selected_parts = st.multiselect(
+        "Body parts to plot",
+        options=body_options,
+        default=default_parts,
+        help=(
+            "The most frequently documented body parts are shown by default. "
+            "All medicine types are combined into each body-part progression."
+        ),
+        key=f"injury_summary_body_parts_{scope_label}",
+    )
+
+    if not selected_parts:
+        st.info("Select at least one body part to plot.")
+        return
+
+    chart_df = summary_df[summary_df["Body Part"].isin(selected_parts)].copy()
+    st.line_chart(
+        chart_df[["Date", "Body Part", "Severity"]],
+        x="Date",
+        y="Severity",
+        color="Body Part",
+        height=440,
+        use_container_width=True,
+    )
+    st.caption(
+        "Severity scale: 0 = Resolved · 1 = Mild · 2 = Moderate · 3 = Severe. "
+        "Each line combines the selected body part's encounters across all medicine types."
+    )
+
+    with st.expander("View summary progression data"):
+        display = chart_df.sort_values(["Body Part", "Date"]).copy()
+        display["Date"] = display["Date"].dt.strftime("%m/%d/%Y")
+        display["Severity Label"] = display["Severity"].map(SEVERITY_LABELS)
+        st.dataframe(
+            display[
+                [
+                    "Date",
+                    "Body Part",
+                    "Severity",
+                    "Severity Label",
+                    "Trend",
+                    "Medicine Types",
+                    "Event IDs",
+                    "Carried Forward",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def render_injury_progression_view(
+    full_df: pd.DataFrame,
+    filtered_df: pd.DataFrame,
+) -> None:
+    """Render conservative, source-linked injury severity and trend progression."""
+    st.subheader("Injury progression")
+    st.caption(
+        "Severity and trend are inferred separately from body-specific text. "
+        "The heuristic is intended for chronology review, not clinical diagnosis."
+    )
+
+    scope_label = st.radio(
+        "Records to analyze",
+        options=["Entire chronology", "Current filtered records"],
+        index=0,
+        horizontal=True,
+        help=(
+            "Use the entire chronology to avoid a text/provider filter silently removing "
+            "later improvement or resolution records."
+        ),
+        key="progression_scope",
+    )
+    source_df = full_df if scope_label == "Entire chronology" else filtered_df
+    if source_df.empty:
+        st.info("No records are available in this analysis scope.")
+        return
+
+    body_options = available_body_parts(source_df)
+    if not body_options:
+        st.info("No body parts are available in this analysis scope.")
+        return
+
+    st.markdown("### Injury severity summary")
+    st.caption(
+        "This chart combines all medicine types and plots one severity line per body part over time."
+    )
+    render_injury_summary_chart(source_df, scope_label)
+    st.divider()
+
+    st.markdown("### Detailed body-part progression")
+    body_part = st.selectbox(
+        "Body part to display",
+        options=body_options,
+        format_func=lambda value: value.title(),
+        key="progression_body_part",
+    )
+
+    all_observations = extract_observations(source_df, body_part=body_part)
+    if all_observations.empty:
+        st.info("No source events list this body part.")
+        return
+
+    medicine_options = sorted(
+        value
+        for value in all_observations["medicine_type"].dropna().astype(str).unique()
+        if value
+    )
+    selected_medicine_types = st.multiselect(
+        "Medicine types to include",
+        options=medicine_options,
+        default=medicine_options,
+        help="All specialties are included by default so the progression spans the full care pathway.",
+        key=f"progression_medicine_types_{body_part}",
+    )
+    if not selected_medicine_types:
+        st.info("Select at least one medicine type to analyze.")
+        return
+
+    observations = all_observations[
+        all_observations["medicine_type"].isin(selected_medicine_types)
+    ].reset_index(drop=True)
+    if observations.empty:
+        st.info("No observations remain for the selected medicine types.")
+        return
+
+    if not marker_locations(body_part):
+        st.warning(
+            f"{body_part.title()} is not mapped to the built-in body outline. "
+            "The evidence and progression table remain available, but no marker will be placed."
+        )
+
+    summary_cols = st.columns(3)
+    summary_cols[0].metric("Source events", len(observations))
+    summary_cols[1].metric(
+        "Body-specific evidence",
+        int(observations["context_specific"].sum()),
+    )
+    summary_cols[2].metric(
+        "Low-confidence events",
+        int((observations["confidence"] == "Low").sum()),
+    )
+
+    review = observations[
+        [
+            "event_id",
+            "encounter_date",
+            "medicine_type",
+            "record_type",
+            "primary_provider",
+            "facility",
+            "suggested_severity",
+            "suggested_trend",
+            "pain_score",
+            "confidence",
+            "matched_text",
+            "reason",
+            "pdf_url",
+            "severity_override",
+            "trend_override",
+        ]
+    ].copy()
+    review["encounter_date"] = review["encounter_date"].dt.date
+    review["suggested_severity"] = review["suggested_severity"].map(
+        lambda value: "Unknown" if pd.isna(value) else SEVERITY_LABELS[int(value)]
+    )
+    review["suggested_trend"] = review["suggested_trend"].map(
+        lambda value: TREND_LABELS.get(str(value), str(value).title())
+    )
+    review = review.rename(
+        columns={
+            "event_id": "Event ID",
+            "encounter_date": "Date",
+            "medicine_type": "Medicine Type",
+            "record_type": "Record Type",
+            "primary_provider": "Provider",
+            "facility": "Facility",
+            "suggested_severity": "Suggested Severity",
+            "suggested_trend": "Suggested Trend",
+            "pain_score": "Pain Score",
+            "confidence": "Confidence",
+            "matched_text": "Evidence",
+            "reason": "Reason",
+            "pdf_url": "PDF",
+            "severity_override": "Severity Override",
+            "trend_override": "Trend Override",
+        }
+    )
+
+    with st.expander("Review and correct inferred progression", expanded=False):
+        st.write(
+            "Only body-specific sentences are used. A listed body part with no matching "
+            "severity statement remains **Unknown** instead of inheriting language from another injury."
+        )
+        reviewed = st.data_editor(
+            review,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[
+                "Event ID",
+                "Date",
+                "Medicine Type",
+                "Record Type",
+                "Provider",
+                "Facility",
+                "Suggested Severity",
+                "Suggested Trend",
+                "Pain Score",
+                "Confidence",
+                "Evidence",
+                "Reason",
+                "PDF",
+            ],
+            column_config={
+                "PDF": st.column_config.LinkColumn("PDF", display_text="View PDF"),
+                "Severity Override": st.column_config.SelectboxColumn(
+                    "Severity Override",
+                    options=[
+                        "Auto",
+                        "Mild",
+                        "Moderate",
+                        "Severe",
+                        "Resolved",
+                        "No severity update",
+                    ],
+                    required=True,
+                ),
+                "Trend Override": st.column_config.SelectboxColumn(
+                    "Trend Override",
+                    options=[
+                        "Auto",
+                        "New",
+                        "Improving",
+                        "Stable",
+                        "Worsening",
+                        "Resolved",
+                        "Unknown",
+                    ],
+                    required=True,
+                ),
+            },
+            key=(
+                f"progression_review_{scope_label}_{body_part}_"
+                f"{len(observations)}_{observations.iloc[0]['event_id']}_"
+                f"{observations.iloc[-1]['event_id']}"
+            ),
+        )
+
+    observations = observations.copy()
+    observations["severity_override"] = reviewed["Severity Override"].tolist()
+    observations["trend_override"] = reviewed["Trend Override"].tolist()
+    snapshots, changes = build_progression(observations)
+    if not snapshots:
+        st.info(
+            "No sufficiently specific severity progression could be established from these records. "
+            "Review the evidence table or apply a manual override where appropriate."
+        )
+        return
+
+    components.html(
+        render_progression_html(snapshots),
+        height=940,
+        scrolling=True,
+    )
+    st.caption(
+        "Color represents severity; arrows represent trend. Horizontal distance is proportional "
+        "to elapsed time. Front and back anatomy are mapped separately, and each point is linked "
+        "to its source event when a PDF URL is available."
+    )
+
+    with st.expander("View progression changes"):
+        display_changes = changes.copy()
+        display_changes["Date"] = display_changes["Date"].dt.strftime("%m/%d/%Y")
+        st.dataframe(
+            display_changes,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "PDF": st.column_config.LinkColumn("PDF", display_text="View PDF"),
+            },
+        )
+
+
 def _huggingface_token() -> str:
     """Read the HF token, accepting the old secret location as a fallback."""
     try:
@@ -483,8 +834,8 @@ def main() -> None:
         st.info("No events match the current filters.")
         return
 
-    table_tab, timeline_tab, chart_tab, summary_tab = st.tabs(
-        ["Table", "Timeline", "Charts", "Summary"]
+    table_tab, timeline_tab, chart_tab, progression_tab, summary_tab = st.tabs(
+        ["Table", "Timeline", "Charts", "Injury Progression", "Summary"]
     )
     with table_tab:
         render_table_view(filtered)
@@ -492,6 +843,8 @@ def main() -> None:
         render_timeline_view(filtered)
     with chart_tab:
         render_chart_view(filtered)
+    with progression_tab:
+        render_injury_progression_view(df, filtered)
     with summary_tab:
         render_summary_view(filtered)
 
