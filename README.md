@@ -9,6 +9,7 @@ Streamlit webapp for personal injury lawyers to visualize, search, and summarize
 - Filterable sidebar: date range, record type, medicine type, facility, provider, body parts, and free-text search
 - **Table** view with stable event IDs, truncated narratives, and CSV export
 - **Timeline** view grouped by encounter date with full narratives and PDF links
+- **Visual Timeline** view showing filtered events on a chronological stem-and-card timeline with hover details, zoom/pan, and a range slider
 - **Charts** view for plotting selected event fields over time
 - **Summary** view using `Falconsai/medical_summarization` through the Hugging Face serverless Inference API
 - Recursive chunk-and-summarize handling for chronologies larger than the model input window
@@ -17,6 +18,7 @@ Streamlit webapp for personal injury lawyers to visualize, search, and summarize
 
 ```text
 ├── app.py                 # Main Streamlit UI
+├── event_timeline.py      # Interactive Plotly event timeline
 ├── data_loader.py         # xlsx parsing + normalization + stable event IDs
 ├── summarizer.py          # Hugging Face medical summarization adapter
 ├── drive_client.py        # optional Google Drive download logic
@@ -52,6 +54,21 @@ Open `http://localhost:8501` and upload a medical chronology `.xlsx` file.
 | Link To Pdf | Cell text with hyperlink URL |
 
 Each source row receives a stable event ID based on its Excel row number. These IDs remain visible in the table and timeline so a generated summary can be checked against the source records.
+
+## Visual Event Timeline
+
+The **Visual Timeline** tab uses the same DataFrame produced by the sidebar filters, so changes to date range, provider, facility, body part, record type, medicine type, or text search immediately change the events shown.
+
+The timeline is designed to resemble a litigation-style medical chronology:
+
+- encounter dates are positioned on the horizontal time axis;
+- each event has a vertical stem and marker;
+- event cards are staggered vertically to reduce overlap;
+- cards show the date, event ID, record type, provider, and a short narrative excerpt;
+- hovering over a marker shows fuller clinical details;
+- events can be colored by record type, medicine type, facility, or provider;
+- all filtered events remain plotted even when the number of visible cards is limited;
+- the range slider and pan/zoom controls make dense or long chronologies easier to inspect.
 
 ## Medical Summarization
 
