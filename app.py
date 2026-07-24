@@ -361,6 +361,115 @@ def render_chart_view(df: pd.DataFrame) -> None:
         )
 
 
+def render_injury_summary_chart(source_df: pd.DataFrame, scope_label: str) -> None:
+    """Plot inferred injury severity over time for multiple body parts at once."""
+    all_observations = extract_observations(source_df)
+    if all_observations.empty:
+        st.info("No body-part observations are available for the summary chart.")
+        return
+
+    snapshots, _ = build_progression(all_observations)
+    if not snapshots:
+        st.info("No sufficiently specific injury severity data are available for the summary chart.")
+        return
+
+    summary_df = pd.DataFrame(
+        [
+            {
+                "Date": pd.Timestamp(snapshot["date"]),
+                "Body Part": str(snapshot["body_part"]).title(),
+                "Severity": int(snapshot["severity"]),
+                "Trend": TREND_LABELS.get(
+                    str(snapshot["trend"]), str(snapshot["trend"]).title()
+                ),
+                "Medicine Type": str(snapshot.get("medicine_type", "")),
+                "Event ID": str(snapshot.get("event_id", "")),
+                "Carried Forward": bool(snapshot.get("carried_forward", False)),
+            }
+            for snapshot in snapshots
+        ]
+    ).sort_values(["Date", "Event ID"])
+
+    # Multiple encounters can occur for the same body part on the same date. For the
+    # line graph, use the last chronological state for that date while retaining the
+    # complete event-level progression in the detailed view below.
+    summary_df = (
+        summary_df.groupby(["Date", "Body Part"], as_index=False, sort=True)
+        .agg(
+            Severity=("Severity", "last"),
+            Trend=("Trend", "last"),
+            **{
+                "Medicine Types": (
+                    "Medicine Type",
+                    lambda values: ", ".join(
+                        dict.fromkeys(value for value in values if value)
+                    ),
+                ),
+                "Event IDs": (
+                    "Event ID",
+                    lambda values: ", ".join(
+                        dict.fromkeys(value for value in values if value)
+                    ),
+                ),
+                "Carried Forward": ("Carried Forward", "max"),
+            },
+        )
+    )
+
+    counts = summary_df["Body Part"].value_counts()
+    body_options = counts.index.tolist()
+    default_parts = body_options[: min(8, len(body_options))]
+    selected_parts = st.multiselect(
+        "Body parts to plot",
+        options=body_options,
+        default=default_parts,
+        help=(
+            "The most frequently documented body parts are shown by default. "
+            "All medicine types are combined into each body-part progression."
+        ),
+        key=f"injury_summary_body_parts_{scope_label}",
+    )
+
+    if not selected_parts:
+        st.info("Select at least one body part to plot.")
+        return
+
+    chart_df = summary_df[summary_df["Body Part"].isin(selected_parts)].copy()
+    st.line_chart(
+        chart_df[["Date", "Body Part", "Severity"]],
+        x="Date",
+        y="Severity",
+        color="Body Part",
+        height=440,
+        use_container_width=True,
+    )
+    st.caption(
+        "Severity scale: 0 = Resolved · 1 = Mild · 2 = Moderate · 3 = Severe. "
+        "Each line combines the selected body part's encounters across all medicine types."
+    )
+
+    with st.expander("View summary progression data"):
+        display = chart_df.sort_values(["Body Part", "Date"]).copy()
+        display["Date"] = display["Date"].dt.strftime("%m/%d/%Y")
+        display["Severity Label"] = display["Severity"].map(SEVERITY_LABELS)
+        st.dataframe(
+            display[
+                [
+                    "Date",
+                    "Body Part",
+                    "Severity",
+                    "Severity Label",
+                    "Trend",
+                    "Medicine Types",
+                    "Event IDs",
+                    "Carried Forward",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def render_injury_progression_view(
     full_df: pd.DataFrame,
     filtered_df: pd.DataFrame,
@@ -393,6 +502,14 @@ def render_injury_progression_view(
         st.info("No body parts are available in this analysis scope.")
         return
 
+    st.markdown("### Injury severity summary")
+    st.caption(
+        "This chart combines all medicine types and plots one severity line per body part over time."
+    )
+    render_injury_summary_chart(source_df, scope_label)
+    st.divider()
+
+    st.markdown("### Detailed body-part progression")
     body_part = st.selectbox(
         "Body part to display",
         options=body_options,
