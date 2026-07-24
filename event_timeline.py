@@ -155,6 +155,8 @@ def build_event_timeline_figure(
             "xanchor": "left",
             "x": 0,
             "title": None,
+            "itemclick": False,
+            "itemdoubleclick": False,
         },
         xaxis={
             "title": None,
@@ -189,10 +191,25 @@ def render_event_timeline_chart(df: pd.DataFrame) -> None:
     """Render a visual event timeline using the current filtered event selection."""
     st.subheader("Event timeline")
 
-    provider_count = _count_providers(df["primary_provider"])
-    facility_count = df["facility"].replace("", pd.NA).dropna().nunique()
+    event_types = _category_series(df, "record_type")
+    event_type_options = sorted(event_types.unique().tolist())
+    selected_event_types = st.multiselect(
+        "Event types to display",
+        options=event_type_options,
+        default=event_type_options,
+        key="event_timeline_event_types",
+        help="Deselect an event type to hide its marker, stem, and event card from the timeline.",
+    )
+
+    visible_df = df[event_types.isin(selected_event_types)].copy()
+    if visible_df.empty:
+        st.info("Select at least one event type to display.")
+        return
+
+    provider_count = _count_providers(visible_df["primary_provider"])
+    facility_count = visible_df["facility"].replace("", pd.NA).dropna().nunique()
     st.caption(
-        f"{len(df)} filtered event{'s' if len(df) != 1 else ''} · "
+        f"{len(visible_df)} filtered event{'s' if len(visible_df) != 1 else ''} · "
         f"{provider_count} provider{'s' if provider_count != 1 else ''} · "
         f"{facility_count} facilit{'ies' if facility_count != 1 else 'y'}"
     )
@@ -216,7 +233,7 @@ def render_event_timeline_chart(df: pd.DataFrame) -> None:
         )
 
     if show_cards:
-        upper = min(40, max(1, len(df)))
+        upper = min(40, max(1, len(visible_df)))
         default = min(18, upper)
         if upper == 1:
             max_cards = 1
@@ -236,7 +253,7 @@ def render_event_timeline_chart(df: pd.DataFrame) -> None:
 
     color_field = TIMELINE_COLOR_FIELDS[color_label]
     fig = build_event_timeline_figure(
-        df,
+        visible_df,
         color_field=color_field,
         max_cards=max_cards,
     )
@@ -251,6 +268,6 @@ def render_event_timeline_chart(df: pd.DataFrame) -> None:
         },
     )
     st.caption(
-        "All currently filtered events are plotted. Hover a marker for the full event details; "
+        "All currently displayed events are plotted. Hover a marker for the full event details; "
         "drag or use the range slider to inspect a narrower time period."
     )
