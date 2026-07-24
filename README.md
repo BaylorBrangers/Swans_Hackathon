@@ -9,6 +9,7 @@ Streamlit webapp for personal injury lawyers to visualize medical chronology eve
 - Filterable sidebar: date range, record type, medicine type, facility, provider, body parts, and free-text search
 - **Table** view with truncated summaries and CSV export
 - **Timeline** view grouped by encounter date with full narratives and PDF links
+- **Charts** view for plotting selected record types, medicine types, facilities, providers, or body parts by day, week, or month
 - Google Drive auto-load (optional, configure later via Streamlit secrets)
 
 ## Project Structure
