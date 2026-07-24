@@ -10,6 +10,7 @@ Streamlit webapp for personal injury lawyers to visualize medical chronology eve
 - **Table** view with truncated summaries and CSV export
 - **Timeline** view grouped by encounter date with full narratives and PDF links
 - **Charts** view for plotting selected record types, medicine types, facilities, providers, or body parts by day, week, or month
+- **Injury Progression** view with body-outline markers showing inferred injury severity over time
 - Google Drive auto-load (optional, configure later via Streamlit secrets)
 
 ## Project Structure
@@ -85,6 +86,27 @@ Single sheet with these columns (Caldwell chronology format):
 | Link To Pdf        | Cell text "pdf" with hyperlink URL  |
 
 The app reads hyperlink targets from the **Link To Pdf** column using openpyxl.
+
+## Injury Progression
+
+The **Injury Progression** tab:
+
+1. Filters the current events to one selected `Medicine Type`.
+2. Uses `Body Parts` to position circles on a front-facing body outline.
+3. Infers status from body-specific sentences in `Summary`:
+   - Yellow: injury, pain, tenderness, sprain, strain, or pain score 1–5/10
+   - Orange: worsening, increased/persistent symptoms, swelling, limited range of motion, or pain score 6–8/10
+   - Red: severe/intractable symptoms, fracture, dislocation, neurological deficit, or pain score 9–10/10
+4. Ignores negated findings such as “no fracture.”
+5. Carries status forward, lowers it for improvement, and removes resolved injuries.
+6. Displays a new body outline only when a status changes.
+
+Expand **Review and correct inferred severity** to inspect the matched phrase and
+manually override any result before using the figure. You may upload a PNG/JPEG
+copy of the supplied body outline or use the built-in outline.
+
+Keyword inference is an aid, not a clinical conclusion. Review all inferred
+statuses against the source medical records.
 
 ## Deploy to Streamlit Community Cloud
 

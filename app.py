@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from data_loader import (
     load_chronology_from_bytes,
     split_multi_value,
     unique_body_parts,
     unique_providers,
+)
+from injury_progression import (
+    SEVERITY_LABELS,
+    build_progression,
+    extract_observations,
+    render_progression_html,
 )
 
 SUMMARY_TRUNCATE = 120
@@ -327,6 +334,135 @@ def render_chart_view(df: pd.DataFrame) -> None:
         )
 
 
+def render_injury_progression_view(df: pd.DataFrame) -> None:
+    """Render inferred body-part severity changes along a time axis."""
+    st.subheader("Injury progression")
+    st.caption(
+        "Severity is inferred from summary keywords and should be reviewed before "
+        "presentation. Select one medicine type at a time."
+    )
+
+    medicine_types = sorted(
+        value for value in df["medicine_type"].dropna().astype(str).unique() if value
+    )
+    if not medicine_types:
+        st.info("No medicine types are available in the filtered events.")
+        return
+
+    medicine_type = st.selectbox(
+        "Medicine Type",
+        options=medicine_types,
+        key="progression_medicine_type",
+    )
+    template = st.file_uploader(
+        "Body outline template (optional)",
+        type=["png", "jpg", "jpeg"],
+        key="body_outline_template",
+        help=(
+            "Upload the supplied front-facing body outline, or leave empty to use "
+            "the built-in outline."
+        ),
+    )
+
+    observations = extract_observations(df, medicine_type)
+    if observations.empty:
+        st.info("No body-part observations exist for this medicine type.")
+        return
+
+    review = observations[
+        [
+            "encounter_date",
+            "body_part",
+            "suggested_action",
+            "reason",
+            "matched_text",
+            "override",
+        ]
+    ].copy()
+    review["encounter_date"] = review["encounter_date"].dt.date
+    review["body_part"] = review["body_part"].str.title()
+    review["suggested_action"] = review["suggested_action"].map(
+        {
+            "injury": SEVERITY_LABELS[1],
+            "worsening": SEVERITY_LABELS[2],
+            "severe": SEVERITY_LABELS[3],
+            "improving": "Improving",
+            "resolved": "Resolved",
+        }
+    )
+    review = review.rename(
+        columns={
+            "encounter_date": "Date",
+            "body_part": "Body Part",
+            "suggested_action": "Suggested Status",
+            "reason": "Reason",
+            "matched_text": "Matched Text",
+            "override": "Override",
+        }
+    )
+
+    with st.expander("Review and correct inferred severity", expanded=False):
+        st.write(
+            "Use **Override** to correct an inference. Negated findings such as "
+            "\"no fracture\" are excluded automatically."
+        )
+        reviewed = st.data_editor(
+            review,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[
+                "Date",
+                "Body Part",
+                "Suggested Status",
+                "Reason",
+                "Matched Text",
+            ],
+            column_config={
+                "Override": st.column_config.SelectboxColumn(
+                    "Override",
+                    options=[
+                        "Auto",
+                        "Injury",
+                        "Worsening injury",
+                        "Severe injury",
+                        "Resolved",
+                    ],
+                    required=True,
+                )
+            },
+            key=f"severity_review_{medicine_type}",
+        )
+
+    observations = observations.copy()
+    observations["override"] = reviewed["Override"].tolist()
+    snapshots, changes = build_progression(observations)
+    if not snapshots:
+        st.info("No injury status changes were inferred for this selection.")
+        return
+
+    image_bytes = template.getvalue() if template is not None else None
+    mime_type = template.type if template is not None else None
+    chart_height = 370
+    components.html(
+        render_progression_html(snapshots, image_bytes, mime_type),
+        height=chart_height,
+        scrolling=True,
+    )
+
+    st.caption(
+        "Hover over a circle for its body part, severity, and inference reason. "
+        "The timeline shows only dates when a status was added, changed, or resolved."
+    )
+    with st.expander("View progression changes"):
+        display_changes = changes.copy()
+        display_changes["Date"] = display_changes["Date"].dt.strftime("%m/%d/%Y")
+        st.dataframe(
+            display_changes,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def main() -> None:
     st.set_page_config(page_title="Medical Chronology", layout="wide")
     st.title("Medical Chronology")
@@ -360,13 +496,17 @@ def main() -> None:
         st.info("No events match the current filters.")
         return
 
-    table_tab, timeline_tab, chart_tab = st.tabs(["Table", "Timeline", "Charts"])
+    table_tab, timeline_tab, chart_tab, progression_tab = st.tabs(
+        ["Table", "Timeline", "Charts", "Injury Progression"]
+    )
     with table_tab:
         render_table_view(filtered)
     with timeline_tab:
         render_timeline_view(filtered)
     with chart_tab:
         render_chart_view(filtered)
+    with progression_tab:
+        render_injury_progression_view(filtered)
 
 
 if __name__ == "__main__":
