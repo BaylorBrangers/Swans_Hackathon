@@ -4,12 +4,12 @@ Streamlit webapp for personal injury lawyers to visualize medical chronology eve
 
 ## Features
 
-- Loads medical chronology data from a Google Drive xlsx via service account
+- **Drag-and-drop upload** — drop an xlsx file to load data immediately (works locally and on Streamlit Cloud)
 - Extracts embedded PDF hyperlinks from Excel cells
 - Filterable sidebar: date range, record type, medicine type, facility, provider, body parts, and free-text search
 - **Table** view with truncated summaries and CSV export
 - **Timeline** view grouped by encounter date with full narratives and PDF links
-- Local file fallback for development before Drive is configured
+- Google Drive auto-load (optional, configure later via Streamlit secrets)
 
 ## Project Structure
 
@@ -87,12 +87,18 @@ The app reads hyperlink targets from the **Link To Pdf** column using openpyxl.
 
 ## Deploy to Streamlit Community Cloud
 
-1. Push this repo to GitHub.
-2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app**.
-3. Select your repo, branch, and main file `app.py`.
-4. Open **Settings → Secrets** and paste your TOML (same structure as local secrets).
-5. Remove `local_xlsx_path` from cloud secrets — production should use Drive only.
-6. Deploy.
+No secrets are required for the current drag-and-drop workflow. Google Drive secrets can be added later when you enable that integration.
+
+1. Sign in at [share.streamlit.io](https://share.streamlit.io) with the same GitHub account that owns the repo.
+2. Click **Create app**.
+3. Fill in:
+   - **Repository:** `BaylorBrangers/Swans_Hackathon`
+   - **Branch:** `main` (or `cursor/medical-records-streamlit-56e5` if not merged yet)
+   - **Main file path:** `app.py`
+4. Click **Deploy**. Streamlit installs from `requirements.txt` automatically.
+5. When the app loads, drag and drop your `.xlsx` file on the public URL (e.g. `https://your-app-name.streamlit.app`).
+
+**Optional later:** Settings → Secrets → add Google Drive service account TOML when you want automatic Drive loading instead of manual upload.
 
 ## Troubleshooting
 
