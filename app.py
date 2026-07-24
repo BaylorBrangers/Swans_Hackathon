@@ -14,8 +14,11 @@ from data_loader import (
 )
 from injury_progression import (
     SEVERITY_LABELS,
+    TREND_LABELS,
+    available_body_parts,
     build_progression,
     extract_observations,
+    marker_locations,
     render_progression_html,
 )
 from summarizer import DEFAULT_MODEL, summarize_events
@@ -358,125 +361,217 @@ def render_chart_view(df: pd.DataFrame) -> None:
         )
 
 
-def render_injury_progression_view(df: pd.DataFrame) -> None:
-    """Render inferred body-part severity changes along a time axis."""
+def render_injury_progression_view(
+    full_df: pd.DataFrame,
+    filtered_df: pd.DataFrame,
+) -> None:
+    """Render conservative, source-linked injury severity and trend progression."""
     st.subheader("Injury progression")
     st.caption(
-        "Severity is inferred from summary keywords and should be reviewed before "
-        "presentation. Select one medicine type at a time."
+        "Severity and trend are inferred separately from body-specific text. "
+        "The heuristic is intended for chronology review, not clinical diagnosis."
     )
 
-    medicine_types = sorted(
-        value for value in df["medicine_type"].dropna().astype(str).unique() if value
-    )
-    if not medicine_types:
-        st.info("No medicine types are available in the filtered events.")
-        return
-
-    medicine_type = st.selectbox(
-        "Medicine Type",
-        options=medicine_types,
-        key="progression_medicine_type",
-    )
-    template = st.file_uploader(
-        "Body outline template (optional)",
-        type=["png", "jpg", "jpeg"],
-        key="body_outline_template",
+    scope_label = st.radio(
+        "Records to analyze",
+        options=["Entire chronology", "Current filtered records"],
+        index=0,
+        horizontal=True,
         help=(
-            "Upload the supplied front-facing body outline, or leave empty to use "
-            "the built-in outline."
+            "Use the entire chronology to avoid a text/provider filter silently removing "
+            "later improvement or resolution records."
         ),
+        key="progression_scope",
+    )
+    source_df = full_df if scope_label == "Entire chronology" else filtered_df
+    if source_df.empty:
+        st.info("No records are available in this analysis scope.")
+        return
+
+    body_options = available_body_parts(source_df)
+    if not body_options:
+        st.info("No body parts are available in this analysis scope.")
+        return
+
+    body_part = st.selectbox(
+        "Body part to display",
+        options=body_options,
+        format_func=lambda value: value.title(),
+        key="progression_body_part",
     )
 
-    observations = extract_observations(df, medicine_type)
-    if observations.empty:
-        st.info("No body-part observations exist for this medicine type.")
+    all_observations = extract_observations(source_df, body_part=body_part)
+    if all_observations.empty:
+        st.info("No source events list this body part.")
         return
+
+    medicine_options = sorted(
+        value
+        for value in all_observations["medicine_type"].dropna().astype(str).unique()
+        if value
+    )
+    selected_medicine_types = st.multiselect(
+        "Medicine types to include",
+        options=medicine_options,
+        default=medicine_options,
+        help="All specialties are included by default so the progression spans the full care pathway.",
+        key=f"progression_medicine_types_{body_part}",
+    )
+    if not selected_medicine_types:
+        st.info("Select at least one medicine type to analyze.")
+        return
+
+    observations = all_observations[
+        all_observations["medicine_type"].isin(selected_medicine_types)
+    ].reset_index(drop=True)
+    if observations.empty:
+        st.info("No observations remain for the selected medicine types.")
+        return
+
+    if not marker_locations(body_part):
+        st.warning(
+            f"{body_part.title()} is not mapped to the built-in body outline. "
+            "The evidence and progression table remain available, but no marker will be placed."
+        )
+
+    summary_cols = st.columns(3)
+    summary_cols[0].metric("Source events", len(observations))
+    summary_cols[1].metric(
+        "Body-specific evidence",
+        int(observations["context_specific"].sum()),
+    )
+    summary_cols[2].metric(
+        "Low-confidence events",
+        int((observations["confidence"] == "Low").sum()),
+    )
 
     review = observations[
         [
+            "event_id",
             "encounter_date",
-            "body_part",
-            "suggested_action",
-            "reason",
+            "medicine_type",
+            "record_type",
+            "primary_provider",
+            "facility",
+            "suggested_severity",
+            "suggested_trend",
+            "pain_score",
+            "confidence",
             "matched_text",
-            "override",
+            "reason",
+            "pdf_url",
+            "severity_override",
+            "trend_override",
         ]
     ].copy()
     review["encounter_date"] = review["encounter_date"].dt.date
-    review["body_part"] = review["body_part"].str.title()
-    review["suggested_action"] = review["suggested_action"].map(
-        {
-            "injury": SEVERITY_LABELS[1],
-            "worsening": SEVERITY_LABELS[2],
-            "severe": SEVERITY_LABELS[3],
-            "improving": "Improving",
-            "resolved": "Resolved",
-        }
+    review["suggested_severity"] = review["suggested_severity"].map(
+        lambda value: "Unknown" if pd.isna(value) else SEVERITY_LABELS[int(value)]
+    )
+    review["suggested_trend"] = review["suggested_trend"].map(
+        lambda value: TREND_LABELS.get(str(value), str(value).title())
     )
     review = review.rename(
         columns={
+            "event_id": "Event ID",
             "encounter_date": "Date",
-            "body_part": "Body Part",
-            "suggested_action": "Suggested Status",
+            "medicine_type": "Medicine Type",
+            "record_type": "Record Type",
+            "primary_provider": "Provider",
+            "facility": "Facility",
+            "suggested_severity": "Suggested Severity",
+            "suggested_trend": "Suggested Trend",
+            "pain_score": "Pain Score",
+            "confidence": "Confidence",
+            "matched_text": "Evidence",
             "reason": "Reason",
-            "matched_text": "Matched Text",
-            "override": "Override",
+            "pdf_url": "PDF",
+            "severity_override": "Severity Override",
+            "trend_override": "Trend Override",
         }
     )
 
-    with st.expander("Review and correct inferred severity", expanded=False):
+    with st.expander("Review and correct inferred progression", expanded=False):
         st.write(
-            "Use **Override** to correct an inference. Negated findings such as "
-            "\"no fracture\" are excluded automatically."
+            "Only body-specific sentences are used. A listed body part with no matching "
+            "severity statement remains **Unknown** instead of inheriting language from another injury."
         )
         reviewed = st.data_editor(
             review,
             use_container_width=True,
             hide_index=True,
             disabled=[
+                "Event ID",
                 "Date",
-                "Body Part",
-                "Suggested Status",
+                "Medicine Type",
+                "Record Type",
+                "Provider",
+                "Facility",
+                "Suggested Severity",
+                "Suggested Trend",
+                "Pain Score",
+                "Confidence",
+                "Evidence",
                 "Reason",
-                "Matched Text",
+                "PDF",
             ],
             column_config={
-                "Override": st.column_config.SelectboxColumn(
-                    "Override",
+                "PDF": st.column_config.LinkColumn("PDF", display_text="View PDF"),
+                "Severity Override": st.column_config.SelectboxColumn(
+                    "Severity Override",
                     options=[
                         "Auto",
-                        "Injury",
-                        "Worsening injury",
-                        "Severe injury",
+                        "Mild",
+                        "Moderate",
+                        "Severe",
                         "Resolved",
+                        "No severity update",
                     ],
                     required=True,
-                )
+                ),
+                "Trend Override": st.column_config.SelectboxColumn(
+                    "Trend Override",
+                    options=[
+                        "Auto",
+                        "New",
+                        "Improving",
+                        "Stable",
+                        "Worsening",
+                        "Resolved",
+                        "Unknown",
+                    ],
+                    required=True,
+                ),
             },
-            key=f"severity_review_{medicine_type}",
+            key=(
+                f"progression_review_{scope_label}_{body_part}_"
+                f"{len(observations)}_{observations.iloc[0]['event_id']}_"
+                f"{observations.iloc[-1]['event_id']}"
+            ),
         )
 
     observations = observations.copy()
-    observations["override"] = reviewed["Override"].tolist()
+    observations["severity_override"] = reviewed["Severity Override"].tolist()
+    observations["trend_override"] = reviewed["Trend Override"].tolist()
     snapshots, changes = build_progression(observations)
     if not snapshots:
-        st.info("No injury status changes were inferred for this selection.")
+        st.info(
+            "No sufficiently specific severity progression could be established from these records. "
+            "Review the evidence table or apply a manual override where appropriate."
+        )
         return
 
-    image_bytes = template.getvalue() if template is not None else None
-    mime_type = template.type if template is not None else None
-    chart_height = 370
     components.html(
-        render_progression_html(snapshots, image_bytes, mime_type),
-        height=chart_height,
+        render_progression_html(snapshots),
+        height=940,
         scrolling=True,
     )
-
     st.caption(
-        "Hover over a circle for its body part, severity, and inference reason. "
-        "The timeline shows only dates when a status was added, changed, or resolved."
+        "Color represents severity; arrows represent trend. Horizontal distance is proportional "
+        "to elapsed time. Front and back anatomy are mapped separately, and each point is linked "
+        "to its source event when a PDF URL is available."
     )
+
     with st.expander("View progression changes"):
         display_changes = changes.copy()
         display_changes["Date"] = display_changes["Date"].dt.strftime("%m/%d/%Y")
@@ -484,6 +579,9 @@ def render_injury_progression_view(df: pd.DataFrame) -> None:
             display_changes,
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "PDF": st.column_config.LinkColumn("PDF", display_text="View PDF"),
+            },
         )
 
 
@@ -629,7 +727,7 @@ def main() -> None:
     with chart_tab:
         render_chart_view(filtered)
     with progression_tab:
-        render_injury_progression_view(filtered)
+        render_injury_progression_view(df, filtered)
     with summary_tab:
         render_summary_view(filtered)
 
