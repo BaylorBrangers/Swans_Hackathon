@@ -10,7 +10,7 @@ Streamlit webapp for personal injury lawyers to visualize, search, and summarize
 - **Table** view with stable event IDs, truncated narratives, and CSV export
 - **Timeline** view grouped by encounter date with full narratives and PDF links
 - **Charts** view for plotting selected record types, medicine types, facilities, providers, or body parts by day, week, or month
-- **Injury Progression** view with body-outline markers showing inferred injury severity over time
+- **Injury Progression** view with source-linked front/back body maps, separate severity and trend, confidence review, and manual overrides
 - Google Drive auto-load (optional, configure later via Streamlit secrets)
 - **Summary** view using `Falconsai/medical_summarization` through the Hugging Face serverless Inference API
 - Recursive chunk-and-summarize handling for chronologies larger than the model input window
@@ -18,11 +18,14 @@ Streamlit webapp for personal injury lawyers to visualize, search, and summarize
 ## Project Structure
 
 ```text
-├── app.py                 # Main Streamlit UI
-├── data_loader.py         # xlsx parsing + normalization + stable event IDs
-├── summarizer.py          # Hugging Face medical summarization adapter
-├── drive_client.py        # optional Google Drive download logic
+├── app.py                         # Main Streamlit UI
+├── data_loader.py                 # xlsx parsing + normalization + stable event IDs
+├── injury_progression.py          # deterministic injury severity/trend inference + body-map timeline
+├── summarizer.py                  # Hugging Face medical summarization adapter
+├── drive_client.py                # optional Google Drive download logic
 ├── requirements.txt
+├── tests/
+│   └── test_injury_progression.py
 ├── .streamlit/
 │   └── config.toml
 └── scripts/
@@ -53,7 +56,7 @@ Open `http://localhost:8501` and upload a medical chronology `.xlsx` file.
 | Summary | Clinical narrative |
 | Link To Pdf | Cell text with hyperlink URL |
 
-Each source row receives a stable event ID based on its Excel row number. These IDs remain visible in the table and timeline so a generated summary can be checked against the source records.
+Each source row receives a stable event ID based on its Excel row number. These IDs remain visible in the table and timeline so generated outputs can be checked against the source records.
 
 ## Medical Summarization
 
@@ -89,24 +92,24 @@ For large chronologies, narrow the event selection with the sidebar filters befo
 
 ## Injury Progression
 
-The **Injury Progression** tab:
+The **Injury Progression** tab is designed as an auditable chronology aid rather than a clinical scoring system.
 
-1. Filters the current events to one selected `Medicine Type`.
-2. Uses `Body Parts` to position circles on a front-facing body outline.
-3. Infers status from body-specific sentences in `Summary`:
-   - Yellow: injury, pain, tenderness, sprain, strain, or pain score 1–5/10
-   - Orange: worsening, increased/persistent symptoms, swelling, limited range of motion, or pain score 6–8/10
-   - Red: severe/intractable symptoms, fracture, dislocation, neurological deficit, or pain score 9–10/10
-4. Ignores negated findings such as “no fracture.”
-5. Carries status forward, lowers it for improvement, and removes resolved injuries.
-6. Displays a new body outline only when a status changes.
+1. Choose whether to analyze the **entire chronology** or only the **currently filtered records**. Entire chronology is the default so a text, provider, or facility filter does not silently remove later improvement or resolution records.
+2. Select the **body part** to follow. All medicine types are included by default, so emergency, radiology, orthopedics, physical therapy, and other records can contribute to one progression.
+3. Severity and trend are inferred separately from body-specific sentences:
+   - **Mild**: pain score 1–3/10 or mild/generic symptom evidence
+   - **Moderate**: pain score 4–6/10 or moderate/functional findings such as limited range of motion or swelling
+   - **Severe**: pain score 7–10/10 or strong findings such as severe symptoms, fracture, dislocation, rupture, or neurological deficit
+   - **Trend**: new, improving, stable, worsening, resolved, or unknown
+4. Numeric change is compared across events. For example, 9/10 → 7/10 remains severe but is marked **improving**, while 9/10 → 3/10 changes from severe to mild and is also marked improving.
+5. The inference engine uses only sentences that mention the selected anatomy. If the spreadsheet lists a body part but the summary has no body-specific severity statement, the result remains **Unknown / low confidence** instead of borrowing severity language from another injury.
+6. Negated findings such as “no fracture” are excluded from positive severity evidence.
+7. Front and back body maps are separate. Unrecognized anatomy is reported as unmapped rather than being silently placed at a default torso coordinate.
+8. Timeline spacing is proportional to elapsed time, and each progression point carries the stable event ID plus a source PDF link when available.
 
-Expand **Review and correct inferred severity** to inspect the matched phrase and
-manually override any result before using the figure. You may upload a PNG/JPEG
-copy of the supplied body outline or use the built-in outline.
+Expand **Review and correct inferred progression** to inspect the event ID, date, provider, facility, medicine type, pain score, confidence, matched evidence, and inference reason. Severity and trend can each be manually overridden before the figure is used.
 
-Keyword inference is an aid, not a clinical conclusion. Review all inferred
-statuses against the source medical records.
+The keyword/rule-based inference is intentionally deterministic and explainable, but it can still miss context or unusual terminology. Review inferred results against the underlying medical records.
 
 ## Deploy to Streamlit Community Cloud
 
