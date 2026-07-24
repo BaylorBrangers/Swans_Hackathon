@@ -1,117 +1,110 @@
 # Medical Records Streamlit App
 
-Streamlit webapp for personal injury lawyers to visualize medical chronology events from an Excel file stored in Google Drive.
+Streamlit webapp for personal injury lawyers to visualize, search, and summarize medical chronology events from Excel.
 
 ## Features
 
-- **Drag-and-drop upload** — drop an xlsx file to load data immediately (works locally and on Streamlit Cloud)
+- **Drag-and-drop upload** — drop an xlsx file to load data immediately
 - Extracts embedded PDF hyperlinks from Excel cells
 - Filterable sidebar: date range, record type, medicine type, facility, provider, body parts, and free-text search
-- **Table** view with truncated summaries and CSV export
+- **Table** view with stable event IDs, truncated narratives, and CSV export
 - **Timeline** view grouped by encounter date with full narratives and PDF links
-- Google Drive auto-load (optional, configure later via Streamlit secrets)
+- **Charts** view for plotting selected event fields over time
+- **Summary** view using `Falconsai/medical_summarization` through the Hugging Face serverless Inference API
+- Recursive chunk-and-summarize handling for chronologies larger than the model input window
 
 ## Project Structure
 
-```
+```text
 ├── app.py                 # Main Streamlit UI
-├── drive_client.py        # Google Drive download logic
-├── data_loader.py         # xlsx parsing + column normalization
+├── data_loader.py         # xlsx parsing + normalization + stable event IDs
+├── summarizer.py          # Hugging Face medical summarization adapter
+├── drive_client.py        # optional Google Drive download logic
 ├── requirements.txt
 ├── .streamlit/
-│   └── config.toml        # Page title, layout
-├── scripts/
-│   └── create_sample_xlsx.py
-└── README.md
+│   └── config.toml
+└── scripts/
+    └── create_sample_xlsx.py
 ```
 
-## Quick Start (Local)
-
-### 1. Install dependencies
+## Quick Start
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 2. Run the app
-
-```bash
 streamlit run app.py
 ```
 
-Open http://localhost:8501 and **drag and drop** your medical chronology `.xlsx` file onto the upload area. No Google Drive setup is required to get started.
-
-### 3. Sample data (optional)
-
-To try the app without your own file:
-
-```bash
-python scripts/create_sample_xlsx.py
-```
-
-Then upload `sample_data/Caldwell - Medical Chronology.xlsx` in the app.
-
-## Google Drive Setup (Optional — Later)
-
-Google Drive integration is available in `drive_client.py` for when you want to load files automatically instead of uploading each time. Setup steps:
-
-1. Create a [Google Cloud project](https://console.cloud.google.com/).
-2. Enable the **Google Drive API** (APIs & Services → Library → Google Drive API → Enable).
-3. Create a **service account** (IAM & Admin → Service Accounts → Create).
-4. Create and download a JSON key for the service account.
-5. Upload your chronology xlsx to Google Drive.
-6. Share the file (or its parent folder) with the service account email (`...@....iam.gserviceaccount.com`) as **Viewer**.
-7. Copy the **file ID** from the Drive URL:
-   ```
-   https://drive.google.com/file/d/<FILE_ID>/view
-   ```
+Open `http://localhost:8501` and upload a medical chronology `.xlsx` file.
 
 ## Expected Excel Schema
 
-Single sheet with these columns (Caldwell chronology format):
+| Column | Example |
+| --- | --- |
+| Encounter Date | 12/07/2024 |
+| Primary Provider | Eric Mast, DO; Grant T. Olsen, NP |
+| Facility | Fisher-Titus Medical Center |
+| Body Parts | Hand, Neck, Back, Head, Shoulder |
+| Medicine Type | Emergency Medicine |
+| Record Type | Encounter Note |
+| Summary | Clinical narrative |
+| Link To Pdf | Cell text with hyperlink URL |
 
-| Column             | Example                             |
-| ------------------ | ----------------------------------- |
-| Encounter Date     | 12/07/2024                          |
-| Primary Provider   | Eric Mast, DO; Grant T. Olsen, NP   |
-| Facility           | Fisher-Titus Medical Center         |
-| Body Parts         | Hand, Neck, Back, Head, Shoulder    |
-| Medicine Type      | Emergency Medicine                  |
-| Record Type        | Encounter Note                      |
-| Summary            | Clinical narrative                  |
-| Link To Pdf        | Cell text "pdf" with hyperlink URL  |
+Each source row receives a stable event ID based on its Excel row number. These IDs remain visible in the table and timeline so a generated summary can be checked against the source records.
 
-The app reads hyperlink targets from the **Link To Pdf** column using openpyxl.
+## Medical Summarization
+
+The demo uses the Apache-2.0 `Falconsai/medical_summarization` model through Hugging Face's hosted `hf-inference` provider. The Streamlit app therefore does not load or host a language model itself and no dedicated GPU endpoint is required.
+
+### 1. Create a Hugging Face token
+
+Create a Hugging Face access token with permission to use Inference Providers.
+
+### 2. Add the token to Streamlit secrets
+
+For local development, create `.streamlit/secrets.toml`. In Streamlit Community Cloud, open **App settings → Secrets**.
+
+```toml
+[huggingface]
+api_token = "hf_YOUR_TOKEN"
+```
+
+Do not commit this token to GitHub.
+
+### Summary behavior
+
+The Summary tab sends the events selected by the existing sidebar filters to the summarizer. Because the model has a relatively small input window, the application:
+
+1. orders the selected events chronologically;
+2. divides the record text into conservative model-sized chunks;
+3. summarizes each chunk through Hugging Face Inference;
+4. recursively summarizes the intermediate results until one summary remains.
+
+This is intentionally a lightweight demo architecture. `Falconsai/medical_summarization` is a task-specific summarization model rather than an instruction-following medical LLM, so the application does not claim sentence-level citations, diagnosis reasoning, or medical advice. The Summary tab displays the exact source events used so the output can be manually checked.
+
+For large chronologies, narrow the event selection with the sidebar filters before generating a summary. This reduces inference calls and usually produces a more focused result.
 
 ## Deploy to Streamlit Community Cloud
 
-No secrets are required for the current drag-and-drop workflow. Google Drive secrets can be added later when you enable that integration.
-
-1. Sign in at [share.streamlit.io](https://share.streamlit.io) with the same GitHub account that owns the repo.
-2. Click **Create app**.
-3. Fill in:
+1. Push the desired branch to GitHub.
+2. Sign in at `share.streamlit.io` with the GitHub account that can access the repository.
+3. Create an app using:
    - **Repository:** `BaylorBrangers/Swans_Hackathon`
-   - **Branch:** `main` (or `cursor/medical-records-streamlit-56e5` if not merged yet)
+   - **Branch:** your deployment branch
    - **Main file path:** `app.py`
-4. Click **Deploy**. Streamlit installs from `requirements.txt` automatically.
-5. When the app loads, drag and drop your `.xlsx` file on the public URL (e.g. `https://your-app-name.streamlit.app`).
+4. Add the `[huggingface]` secret shown above.
+5. Deploy.
 
-**Optional later:** Settings → Secrets → add Google Drive service account TOML when you want automatic Drive loading instead of manual upload.
+Without the Hugging Face token, upload/search/timeline/chart functionality still works; the Summary tab displays configuration instructions instead of calling the model.
 
-## Troubleshooting
+## Google Drive Setup (Optional)
 
-| Issue | Fix |
-| ----- | --- |
-| "Could not read the uploaded file" | Ensure the xlsx matches the Caldwell schema below |
-| Missing columns error | Verify column names match exactly (see schema table) |
-| Skipped rows warning | Some encounter dates could not be parsed (MM/DD/YYYY expected) |
-| Drive 404 / file not found (optional) | Verify `file_id` and that the file is shared with the service account |
-| Permission denied (optional) | Share the file/folder with the service account email as Viewer |
+`drive_client.py` remains available for automatic Drive loading. Configure a Google service account and grant it read access to the chronology file/folder before enabling that path.
 
 ## Security
 
-- Service account credentials live in Streamlit secrets only — never commit JSON keys or `secrets.toml`.
-- The app uses read-only Drive scope (`drive.readonly`).
-- `.gitignore` excludes secrets, credential JSON, and virtual environments.
+- Never commit Hugging Face tokens, Google credentials, or `.streamlit/secrets.toml`.
+- When a summary is generated, selected medical-record text is sent to Hugging Face's hosted inference service.
+- Use synthetic or appropriately de-identified data for this demo unless you have confirmed that the chosen infrastructure and agreements are appropriate for identifiable health information.
+- Generated summaries can omit or misstate information and must be checked against the source records.
