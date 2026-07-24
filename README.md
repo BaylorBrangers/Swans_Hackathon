@@ -95,17 +95,18 @@ For large chronologies, narrow the event selection with the sidebar filters befo
 The **Injury Progression** tab is designed as an auditable chronology aid rather than a clinical scoring system.
 
 1. Choose whether to analyze the **entire chronology** or only the **currently filtered records**. Entire chronology is the default so a text, provider, or facility filter does not silently remove later improvement or resolution records.
-2. Select the **body part** to follow. All medicine types are included by default, so emergency, radiology, orthopedics, physical therapy, and other records can contribute to one progression.
-3. Severity and trend are inferred separately from body-specific sentences:
+2. Select the **body part** to follow. All medicine types are selected by default, and multiple medicine types can be included simultaneously so emergency, radiology, orthopedics, physical therapy, and other records form one continuous progression.
+3. Every selected encounter for that body part remains on the timeline after severity has been established, even when the encounter does not change the severity score. If a later record has no new severity estimate, the prior severity is carried forward and explicitly labeled as carried forward instead of dropping that specialty from the progression.
+4. Severity and trend are inferred separately from body-specific sentences:
    - **Mild**: pain score 1–3/10 or mild/generic symptom evidence
    - **Moderate**: pain score 4–6/10 or moderate/functional findings such as limited range of motion or swelling
    - **Severe**: pain score 7–10/10 or strong findings such as severe symptoms, fracture, dislocation, rupture, or neurological deficit
    - **Trend**: new, improving, stable, worsening, resolved, or unknown
-4. Numeric change is compared across events. For example, 9/10 → 7/10 remains severe but is marked **improving**, while 9/10 → 3/10 changes from severe to mild and is also marked improving.
-5. The inference engine uses only sentences that mention the selected anatomy. If the spreadsheet lists a body part but the summary has no body-specific severity statement, the result remains **Unknown / low confidence** instead of borrowing severity language from another injury.
-6. Negated findings such as “no fracture” are excluded from positive severity evidence.
-7. Front and back body maps are separate. Unrecognized anatomy is reported as unmapped rather than being silently placed at a default torso coordinate.
-8. Timeline spacing is proportional to elapsed time, and each progression point carries the stable event ID plus a source PDF link when available.
+5. Numeric change is compared across events. For example, 9/10 → 7/10 remains severe but is marked **improving**, while 9/10 → 3/10 changes from severe to mild and is also marked improving.
+6. The inference engine uses only sentences that mention the selected anatomy. If the spreadsheet lists a body part but the summary has no body-specific severity statement, the result remains **Unknown / low confidence** instead of borrowing severity language from another injury.
+7. Negated findings such as “no fracture” are excluded from positive severity evidence.
+8. Front and back body maps are separate. Unrecognized anatomy is reported as unmapped rather than being silently placed at a default torso coordinate.
+9. Timeline spacing is proportional to elapsed time, every card identifies its medicine type, and each progression point carries the stable event ID plus a source PDF link when available.
 
 Expand **Review and correct inferred progression** to inspect the event ID, date, provider, facility, medicine type, pain score, confidence, matched evidence, and inference reason. Severity and trend can each be manually overridden before the figure is used.
 
