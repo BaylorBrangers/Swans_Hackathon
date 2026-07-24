@@ -21,6 +21,7 @@ from injury_progression import (
     marker_locations,
     render_progression_html,
 )
+from lost_income import render_lost_income_view
 from summarizer import DEFAULT_MODEL, summarize_events
 
 SUMMARY_TRUNCATE = 120
@@ -834,8 +835,8 @@ def main() -> None:
         st.info("No events match the current filters.")
         return
 
-    table_tab, timeline_tab, chart_tab, progression_tab, summary_tab = st.tabs(
-        ["Table", "Timeline", "Charts", "Injury Progression", "Summary"]
+    table_tab, timeline_tab, chart_tab, progression_tab, summary_tab, lost_income_tab = st.tabs(
+        ["Table", "Timeline", "Charts", "Injury Progression", "Summary", "Lost Income"]
     )
     with table_tab:
         render_table_view(filtered)
@@ -847,6 +848,8 @@ def main() -> None:
         render_injury_progression_view(df, filtered)
     with summary_tab:
         render_summary_view(filtered)
+    with lost_income_tab:
+        render_lost_income_view()
 
 
 if __name__ == "__main__":
