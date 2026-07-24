@@ -2,86 +2,57 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 
 from data_loader import (
     load_chronology_from_bytes,
-    load_chronology_from_path,
     split_multi_value,
     unique_body_parts,
     unique_providers,
 )
-from drive_client import build_drive_service, download_file_bytes
 
 SUMMARY_TRUNCATE = 120
-CACHE_TTL_SECONDS = 300
 
 
-def _secrets_ready() -> bool:
-    try:
-        st.secrets["drive"]["file_id"]
-        st.secrets["google_service_account"]["client_email"]
-        return True
-    except (KeyError, FileNotFoundError):
-        return False
-
-
-def _local_path_configured() -> str | None:
-    try:
-        path = st.secrets.get("drive", {}).get("local_xlsx_path")
-        if path:
-            return str(path)
-    except (KeyError, FileNotFoundError):
-        pass
-    return None
-
-
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Loading medical chronology...")
-def fetch_chronology(source_key: str) -> tuple[pd.DataFrame, dict]:
-    """Load chronology data from local file or Google Drive."""
-    local_path = _local_path_configured()
-    if local_path and Path(local_path).exists():
-        return load_chronology_from_path(local_path)
-
-    if not _secrets_ready():
-        raise RuntimeError("missing_secrets")
-
-    service = build_drive_service(dict(st.secrets["google_service_account"]))
-    file_id = st.secrets["drive"]["file_id"]
-    xlsx_bytes = download_file_bytes(service, file_id)
+@st.cache_data(show_spinner="Parsing chronology...")
+def parse_uploaded_xlsx(xlsx_bytes: bytes) -> tuple[pd.DataFrame, dict]:
+    """Parse uploaded xlsx bytes into a normalized chronology DataFrame."""
     return load_chronology_from_bytes(xlsx_bytes)
 
 
-def show_setup_instructions() -> None:
-    st.error("Configuration required")
-    st.markdown(
-        """
-Create `.streamlit/secrets.toml` (local) or add secrets in Streamlit Cloud with:
-
-```toml
-[drive]
-file_id = "YOUR_GOOGLE_DRIVE_FILE_ID"
-# local_xlsx_path = "/path/to/Caldwell - Medical Chronology.xlsx"
-
-[google_service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
-client_email = "...@....iam.gserviceaccount.com"
-client_id = "..."
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "..."
-```
-
-See the README for Google Cloud setup and deployment steps.
-"""
+def render_upload_section() -> bool:
+    """Show drag-and-drop uploader; return True when a file is loaded."""
+    st.subheader("Upload chronology")
+    uploaded = st.file_uploader(
+        "Drag and drop your medical chronology xlsx here",
+        type=["xlsx"],
+        help="Expected format: Caldwell medical chronology with Encounter Date, Provider, Facility, and related columns.",
     )
+
+    if uploaded is not None:
+        st.session_state["xlsx_bytes"] = uploaded.getvalue()
+        st.session_state["xlsx_name"] = uploaded.name
+
+    if not st.session_state.get("xlsx_bytes"):
+        st.info(
+            "Upload an `.xlsx` file to explore the chronology. "
+            "Google Drive connection can be configured later."
+        )
+        return False
+
+    name = st.session_state.get("xlsx_name", "uploaded file")
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.success(f"**{name}**")
+    with col2:
+        if st.button("Clear", use_container_width=True):
+            st.session_state.pop("xlsx_bytes", None)
+            st.session_state.pop("xlsx_name", None)
+            parse_uploaded_xlsx.clear()
+            st.rerun()
+
+    return True
 
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
@@ -240,24 +211,20 @@ def main() -> None:
     st.set_page_config(page_title="Medical Chronology", layout="wide")
     st.title("Medical Chronology")
 
-    if st.sidebar.button("Refresh now"):
-        fetch_chronology.clear()
-        st.rerun()
+    if not render_upload_section():
+        return
+
+    xlsx_bytes = st.session_state["xlsx_bytes"]
 
     try:
-        df, stats = fetch_chronology("default")
-    except RuntimeError as exc:
-        if str(exc) == "missing_secrets":
-            show_setup_instructions()
-            return
-        raise
-    except FileNotFoundError as exc:
-        st.error(str(exc))
-        st.info("Set `drive.local_xlsx_path` in secrets or configure Google Drive access.")
-        return
+        df, stats = parse_uploaded_xlsx(xlsx_bytes)
     except Exception as exc:
-        st.error(f"Failed to load chronology: {exc}")
-        st.info("Check the README troubleshooting section for Drive API and secrets setup.")
+        st.error(f"Could not read the uploaded file: {exc}")
+        st.info(
+            "Make sure the spreadsheet matches the Caldwell chronology format "
+            "(Encounter Date, Primary Provider, Facility, Body Parts, Medicine Type, "
+            "Record Type, Summary, Link To Pdf)."
+        )
         return
 
     if stats.get("skipped_rows"):

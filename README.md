@@ -35,51 +35,27 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Create sample data (optional)
-
-If you do not have the Caldwell sample file yet:
-
-```bash
-python scripts/create_sample_xlsx.py
-```
-
-This writes `sample_data/Caldwell - Medical Chronology.xlsx` with the expected schema.
-
-### 3. Configure secrets
-
-Create `.streamlit/secrets.toml` (never commit this file):
-
-```toml
-[drive]
-file_id = "YOUR_GOOGLE_DRIVE_FILE_ID"
-
-# Local dev — read from disk instead of Drive
-local_xlsx_path = "sample_data/Caldwell - Medical Chronology.xlsx"
-
-[google_service_account]
-type = "service_account"
-project_id = "your-project-id"
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-client_email = "your-sa@your-project.iam.gserviceaccount.com"
-client_id = "..."
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "..."
-```
-
-For local testing with only the sample file, you can set `local_xlsx_path` and omit the Google service account fields until Drive is ready.
-
-### 4. Run the app
+### 2. Run the app
 
 ```bash
 streamlit run app.py
 ```
 
-Open http://localhost:8501
+Open http://localhost:8501 and **drag and drop** your medical chronology `.xlsx` file onto the upload area. No Google Drive setup is required to get started.
 
-## Google Cloud Setup (One-Time)
+### 3. Sample data (optional)
+
+To try the app without your own file:
+
+```bash
+python scripts/create_sample_xlsx.py
+```
+
+Then upload `sample_data/Caldwell - Medical Chronology.xlsx` in the app.
+
+## Google Drive Setup (Optional — Later)
+
+Google Drive integration is available in `drive_client.py` for when you want to load files automatically instead of uploading each time. Setup steps:
 
 1. Create a [Google Cloud project](https://console.cloud.google.com/).
 2. Enable the **Google Drive API** (APIs & Services → Library → Google Drive API → Enable).
@@ -122,11 +98,11 @@ The app reads hyperlink targets from the **Link To Pdf** column using openpyxl.
 
 | Issue | Fix |
 | ----- | --- |
-| "Configuration required" | Add `.streamlit/secrets.toml` locally or secrets in Streamlit Cloud |
-| Drive 404 / file not found | Verify `file_id` and that the file is shared with the service account |
-| Permission denied | Share the file/folder with the service account email as Viewer |
-| Missing columns error | Ensure the xlsx matches the Caldwell schema above |
+| "Could not read the uploaded file" | Ensure the xlsx matches the Caldwell schema below |
+| Missing columns error | Verify column names match exactly (see schema table) |
 | Skipped rows warning | Some encounter dates could not be parsed (MM/DD/YYYY expected) |
+| Drive 404 / file not found (optional) | Verify `file_id` and that the file is shared with the service account |
+| Permission denied (optional) | Share the file/folder with the service account email as Viewer |
 
 ## Security
 
