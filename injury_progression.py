@@ -1,4 +1,4 @@
-"""Infer and visualize injury progression from medical chronology events."""
+"""Infer and visualize auditable injury progression from medical chronology events."""
 
 from __future__ import annotations
 
@@ -7,89 +7,124 @@ import html
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import pandas as pd
 
 from data_loader import split_multi_value
 
-SEVERITY_LABELS = {1: "Injury", 2: "Worsening injury", 3: "Severe injury"}
-SEVERITY_COLORS = {1: "#facc15", 2: "#f97316", 3: "#dc2626"}
-
-# Coordinates are percentages of the supplied front-facing body outline.
-# Unspecified paired body parts are marked on both sides.
-BODY_COORDINATES: dict[str, list[tuple[float, float]]] = {
-    "head": [(50, 8)],
-    "face": [(50, 11)],
-    "neck": [(50, 18)],
-    "shoulder": [(34, 25), (66, 25)],
-    "chest": [(50, 31)],
-    "rib": [(50, 35)],
-    "upper back": [(50, 32)],
-    "back": [(50, 42)],
-    "lower back": [(50, 48)],
-    "abdomen": [(50, 42)],
-    "pelvis": [(50, 51)],
-    "hip": [(40, 51), (60, 51)],
-    "arm": [(24, 37), (76, 37)],
-    "upper arm": [(28, 32), (72, 32)],
-    "elbow": [(20, 43), (80, 43)],
-    "forearm": [(18, 48), (82, 48)],
-    "wrist": [(15, 53), (85, 53)],
-    "hand": [(12, 57), (88, 57)],
-    "finger": [(9, 59), (91, 59)],
-    "thigh": [(42, 61), (58, 61)],
-    "knee": [(42, 72), (58, 72)],
-    "leg": [(42, 81), (58, 81)],
-    "calf": [(42, 82), (58, 82)],
-    "shin": [(43, 82), (57, 82)],
-    "ankle": [(43, 91), (57, 91)],
-    "foot": [(42, 96), (58, 96)],
+SEVERITY_LABELS = {0: "Resolved", 1: "Mild", 2: "Moderate", 3: "Severe"}
+SEVERITY_COLORS = {
+    0: "#16a34a",
+    1: "#facc15",
+    2: "#f97316",
+    3: "#dc2626",
+}
+TREND_LABELS = {
+    "new": "New",
+    "improving": "Improving",
+    "stable": "Stable",
+    "worsening": "Worsening",
+    "resolved": "Resolved",
+    "unknown": "Unknown",
+}
+TREND_SYMBOLS = {
+    "new": "+",
+    "improving": "↓",
+    "stable": "→",
+    "worsening": "↑",
+    "resolved": "✓",
+    "unknown": "?",
 }
 
-LEFT_COORDINATES = {
-    part: [coords[-1]] for part, coords in BODY_COORDINATES.items() if len(coords) == 2
-}
-RIGHT_COORDINATES = {
-    part: [coords[0]] for part, coords in BODY_COORDINATES.items() if len(coords) == 2
+
+@dataclass(frozen=True)
+class BodyLocation:
+    """One marker position on the built-in front/back body map."""
+
+    view: str
+    x: float
+    y: float
+
+
+# Coordinates are percentages within the individual front/back outline panels.
+# Unspecified paired body parts are intentionally shown on both sides.
+BODY_COORDINATES: dict[str, list[BodyLocation]] = {
+    "head": [BodyLocation("front", 50, 8)],
+    "face": [BodyLocation("front", 50, 12)],
+    "neck": [BodyLocation("front", 50, 18)],
+    "shoulder": [BodyLocation("front", 34, 25), BodyLocation("front", 66, 25)],
+    "chest": [BodyLocation("front", 50, 32)],
+    "rib": [BodyLocation("front", 50, 36)],
+    "abdomen": [BodyLocation("front", 50, 43)],
+    "pelvis": [BodyLocation("front", 50, 51)],
+    "hip": [BodyLocation("front", 40, 52), BodyLocation("front", 60, 52)],
+    "upper arm": [BodyLocation("front", 28, 33), BodyLocation("front", 72, 33)],
+    "arm": [BodyLocation("front", 24, 38), BodyLocation("front", 76, 38)],
+    "elbow": [BodyLocation("front", 20, 43), BodyLocation("front", 80, 43)],
+    "forearm": [BodyLocation("front", 18, 49), BodyLocation("front", 82, 49)],
+    "wrist": [BodyLocation("front", 15, 54), BodyLocation("front", 85, 54)],
+    "hand": [BodyLocation("front", 12, 58), BodyLocation("front", 88, 58)],
+    "finger": [BodyLocation("front", 9, 60), BodyLocation("front", 91, 60)],
+    "thigh": [BodyLocation("front", 42, 62), BodyLocation("front", 58, 62)],
+    "knee": [BodyLocation("front", 42, 72), BodyLocation("front", 58, 72)],
+    "leg": [BodyLocation("front", 42, 82), BodyLocation("front", 58, 82)],
+    "calf": [BodyLocation("back", 42, 82), BodyLocation("back", 58, 82)],
+    "shin": [BodyLocation("front", 43, 82), BodyLocation("front", 57, 82)],
+    "ankle": [BodyLocation("front", 43, 91), BodyLocation("front", 57, 91)],
+    "foot": [BodyLocation("front", 42, 96), BodyLocation("front", 58, 96)],
+    "upper back": [BodyLocation("back", 50, 32)],
+    "back": [BodyLocation("back", 50, 41)],
+    "lower back": [BodyLocation("back", 50, 48)],
+    "scapula": [BodyLocation("back", 38, 31), BodyLocation("back", 62, 31)],
+    "sacrum": [BodyLocation("back", 50, 53)],
+    "buttock": [BodyLocation("back", 42, 55), BodyLocation("back", 58, 55)],
+    "achilles": [BodyLocation("back", 43, 91), BodyLocation("back", 57, 91)],
 }
 
 BODY_ALIASES: dict[str, tuple[str, ...]] = {
     "head": ("head", "headache", "cephalgia", "skull", "cranial"),
-    "face": ("face", "facial", "jaw", "mandible"),
-    "neck": ("neck", "cervical", "c-spine"),
-    "shoulder": ("shoulder", "rotator cuff", "glenohumeral"),
-    "chest": ("chest", "sternum", "thorax", "thoracic"),
+    "face": ("face", "facial", "jaw", "mandible", "tmj"),
+    "neck": ("neck", "cervical spine", "cervical", "c-spine", "c spine"),
+    "shoulder": ("shoulder", "shoulders", "rotator cuff", "glenohumeral"),
+    "chest": ("chest", "sternum", "thorax"),
     "rib": ("rib", "ribs", "costal"),
-    "upper back": ("upper back", "thoracic spine", "t-spine"),
-    "lower back": ("lower back", "low back", "lumbar", "l-spine"),
-    "back": ("back", "spine", "spinal"),
+    "upper back": ("upper back", "thoracic spine", "thoracic back", "t-spine", "t spine", "trapezius"),
+    "lower back": ("lower back", "low back", "lumbar spine", "lumbar", "l-spine", "l spine"),
+    "back": ("back",),
     "abdomen": ("abdomen", "abdominal", "stomach"),
-    "pelvis": ("pelvis", "pelvic", "sacrum", "sacral"),
-    "hip": ("hip", "acetabulum"),
-    "upper arm": ("upper arm", "humerus"),
-    "forearm": ("forearm", "radius", "ulna"),
-    "arm": ("arm",),
-    "elbow": ("elbow",),
-    "wrist": ("wrist", "carpal"),
-    "hand": ("hand", "palm"),
-    "finger": ("finger", "fingers", "thumb", "digit"),
-    "thigh": ("thigh", "femur"),
-    "knee": ("knee", "patella"),
-    "calf": ("calf",),
-    "shin": ("shin", "tibia", "fibula"),
-    "leg": ("leg",),
-    "ankle": ("ankle",),
+    "pelvis": ("pelvis", "pelvic"),
+    "sacrum": ("sacrum", "sacral", "sacroiliac", "si joint", "s-i joint", "coccyx", "coccygeal"),
+    "scapula": ("scapula", "scapular", "shoulder blade"),
+    "buttock": ("buttock", "buttocks", "gluteal", "glute"),
+    "hip": ("hip", "hips", "acetabulum", "acetabular"),
+    "upper arm": ("upper arm", "humerus", "humeral"),
+    "forearm": ("forearm", "radius", "radial", "ulna", "ulnar"),
+    "arm": ("arm", "arms"),
+    "elbow": ("elbow", "elbows"),
+    "wrist": ("wrist", "wrists", "carpal"),
+    "hand": ("hand", "hands", "palm"),
+    "finger": ("finger", "fingers", "thumb", "digit", "digits"),
+    "thigh": ("thigh", "thighs", "femur", "femoral"),
+    "knee": ("knee", "knees", "patella", "patellar"),
+    "calf": ("calf", "calves"),
+    "shin": ("shin", "shins", "tibia", "tibial", "fibula", "fibular"),
+    "leg": ("leg", "legs"),
+    "ankle": ("ankle", "ankles"),
     "foot": ("foot", "feet", "heel", "toe", "toes"),
+    "achilles": ("achilles", "achilles tendon"),
 }
 
 ALIAS_TO_BODY = {
     alias: body for body, aliases in BODY_ALIASES.items() for alias in aliases
 }
+SORTED_ALIASES = sorted(ALIAS_TO_BODY.items(), key=lambda item: len(item[0]), reverse=True)
 
 RESOLVED_PATTERNS = (
     (r"\bresolved?\b", "resolved"),
     (r"\basymptomatic\b", "asymptomatic"),
     (r"\bpain[- ]free\b", "pain-free"),
+    (r"\b(?:0|0\.0)\s*(?:/|out of)\s*10\b", "pain score 0/10"),
     (r"\bno longer (?:has|having|reports?|experiences?)\b", "no longer reported"),
     (r"\bdenies (?:any )?(?:pain|symptoms?)\b", "denies pain or symptoms"),
 )
@@ -99,106 +134,119 @@ IMPROVING_PATTERNS = (
     (r"\bfeels? better\b", "feels better"),
     (r"\bresolving\b", "resolving"),
 )
-SEVERE_PATTERNS = (
-    (r"\b(?:9|10)(?:\.\d+)?\s*(?:/|out of)\s*10\b", "pain score 9–10/10"),
-    (r"\bsevere(?:ly)?\b", "severe"),
-    (r"\bexcruciating\b", "excruciating"),
-    (r"\bintractable\b", "intractable"),
-    (r"\bmarked(?:ly)?\b", "marked"),
-    (r"\bfracture[sd]?\b", "fracture"),
-    (r"\bdislocat(?:e[sd]?|ion)\b", "dislocation"),
-    (r"\bruptur(?:e[sd]?|ing)\b", "rupture"),
-    (r"\bneurologic(?:al)? deficit\b", "neurological deficit"),
-    (r"\bloss of function\b", "loss of function"),
-)
 WORSENING_PATTERNS = (
-    (r"\b(?:6|7|8)(?:\.\d+)?\s*(?:/|out of)\s*10\b", "pain score 6–8/10"),
     (r"\bwors(?:e|ened|ening)\b", "worsening"),
     (r"\bincreas(?:e[sd]?|ing)\b", "increased"),
     (r"\baggravat(?:e[sd]?|ing|ion)\b", "aggravated"),
     (r"\bprogressive(?:ly)?\b", "progressive"),
-    (r"\bpersistent(?:ly)?\b", "persistent"),
-    (
-        r"\b(?:reduced|decreased|limited) range of motion\b",
-        "reduced range of motion",
-    ),
-    (r"\bswelling\b", "swelling"),
 )
-INJURY_PATTERNS = (
-    (r"\b[1-5](?:\.\d+)?\s*(?:/|out of)\s*10\b", "pain score 1–5/10"),
-    (r"\bpain(?:ful)?\b", "pain"),
-    (r"\btender(?:ness)?\b", "tenderness"),
-    (r"\bsore(?:ness)?\b", "soreness"),
-    (r"\bsprain(?:ed)?\b", "sprain"),
-    (r"\bstrain(?:ed)?\b", "strain"),
-    (r"\bbruis(?:e[sd]?|ing)\b", "bruising"),
-    (r"\bcontusion\b", "contusion"),
+STABLE_PATTERNS = (
+    (r"\bunchanged\b", "unchanged"),
+    (r"\bstable\b", "stable"),
+    (r"\bno (?:significant )?change\b", "no significant change"),
 )
 
-DEFAULT_BODY_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 374 568">
+SEVERE_PATTERNS = (
+    (r"\bsevere(?:ly)?\b", "severe", "descriptor"),
+    (r"\bexcruciating\b", "excruciating", "descriptor"),
+    (r"\bintractable\b", "intractable", "descriptor"),
+    (r"\bfracture[sd]?\b", "fracture", "structural"),
+    (r"\bdislocat(?:e[sd]?|ion)\b", "dislocation", "structural"),
+    (r"\bruptur(?:e[sd]?|ing)\b", "rupture", "structural"),
+    (r"\bneurologic(?:al)? deficit\b", "neurological deficit", "structural"),
+    (r"\bloss of function\b", "loss of function", "structural"),
+)
+MODERATE_PATTERNS = (
+    (r"\bmoderate(?:ly)?\b", "moderate", "descriptor"),
+    (r"\bmarked(?:ly)?\b", "marked", "descriptor"),
+    (r"\b(?:reduced|decreased|limited) range of motion\b", "limited range of motion", "functional"),
+    (r"\bswelling\b", "swelling", "functional"),
+    (r"\bweakness\b", "weakness", "functional"),
+    (r"\bpersistent(?:ly)?\b", "persistent symptoms", "functional"),
+)
+MILD_PATTERNS = (
+    (r"\bmild(?:ly)?\b", "mild", "descriptor"),
+    (r"\bpain(?:ful)?\b", "pain", "generic_symptom"),
+    (r"\btender(?:ness)?\b", "tenderness", "generic_symptom"),
+    (r"\bsore(?:ness)?\b", "soreness", "generic_symptom"),
+    (r"\bsprain(?:ed)?\b", "sprain", "generic_symptom"),
+    (r"\bstrain(?:ed)?\b", "strain", "generic_symptom"),
+    (r"\bbruis(?:e[sd]?|ing)\b", "bruising", "generic_symptom"),
+    (r"\bcontusion\b", "contusion", "generic_symptom"),
+)
+
+PAIN_SCORE_RE = re.compile(r"\b(10(?:\.0+)?|[0-9](?:\.\d+)?)\s*(?:/|out of)\s*10\b", re.I)
+
+BODY_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 374 568">
 <rect width="374" height="568" fill="white"/>
 <g fill="white" stroke="#171717" stroke-width="3.2" stroke-linejoin="round">
-<path d="M187 7 C170 7 163 20 163 36 C163 46 166 58 173 65 L172 83
-C165 91 147 94 130 101 C108 110 101 128 104 150 L99 179
-C94 199 88 218 90 240 L85 267 L75 278 C70 286 75 289 80 284
-L75 301 C73 309 80 311 83 304 L88 289 L84 307 C82 315 90 317 93 309
-L98 291 L94 309 C93 317 101 318 104 311 L109 291 L107 305
-C106 312 114 313 117 306 L123 283 C126 273 124 262 122 253
-L130 219 L135 193 L142 172 L148 197 L145 226 L148 252
-L139 310 C136 333 137 353 143 373 L145 402 L154 447 L151 482
-L144 513 L136 543 C133 553 146 558 162 555 L174 539 L176 513
-L171 491 L177 457 L181 425 L176 399 L181 368 L183 287
-L191 287 L193 368 L198 399 L193 425 L197 457 L203 491 L198 513
-L200 539 L212 555 C228 558 241 553 238 543 L230 513 L223 482
-L220 447 L229 402 L231 373 C237 353 238 333 235 310 L226 252
-L229 226 L226 197 L232 172 L239 193 L244 219 L252 253
-C250 262 248 273 251 283 L257 306 C260 313 268 312 267 305 L265 291
-L270 311 C273 318 281 317 280 309 L276 291 L281 309
-C284 317 292 315 290 307 L286 289 L291 304 C294 311 301 309 299 301
-L294 284 C299 289 304 286 299 278 L289 267 L284 240
-C286 218 280 199 275 179 L270 150 C273 128 266 110 244 101
-C227 94 209 91 202 83 L201 65 C208 58 211 46 211 36
-C211 20 204 7 187 7 Z"/>
+<path d="M187 7 C170 7 163 20 163 36 C163 46 166 58 173 65 L172 83 C165 91 147 94 130 101 C108 110 101 128 104 150 L99 179 C94 199 88 218 90 240 L85 267 L75 278 C70 286 75 289 80 284 L75 301 C73 309 80 311 83 304 L88 289 L84 307 C82 315 90 317 93 309 L98 291 L94 309 C93 317 101 318 104 311 L109 291 L107 305 C106 312 114 313 117 306 L123 283 C126 273 124 262 122 253 L130 219 L135 193 L142 172 L148 197 L145 226 L148 252 L139 310 C136 333 137 353 143 373 L145 402 L154 447 L151 482 L144 513 L136 543 C133 553 146 558 162 555 L174 539 L176 513 L171 491 L177 457 L181 425 L176 399 L181 368 L183 287 L191 287 L193 368 L198 399 L193 425 L197 457 L203 491 L198 513 L200 539 L212 555 C228 558 241 553 238 543 L230 513 L223 482 L220 447 L229 402 L231 373 C237 353 238 333 235 310 L226 252 L229 226 L226 197 L232 172 L239 193 L244 219 L252 253 C250 262 248 273 251 283 L257 306 C260 313 268 312 267 305 L265 291 L270 311 C273 318 281 317 280 309 L276 291 L281 309 C284 317 292 315 290 307 L286 289 L291 304 C294 311 301 309 299 301 L294 284 C299 289 304 286 299 278 L289 267 L284 240 C286 218 280 199 275 179 L270 150 C273 128 266 110 244 101 C227 94 209 91 202 83 L201 65 C208 58 211 46 211 36 C211 20 204 7 187 7 Z"/>
 </g></svg>"""
 
 
 @dataclass(frozen=True)
 class Inference:
-    action: str
-    suggested_level: int
+    """Body-specific severity and trend evidence extracted from one event."""
+
+    severity: int | None
+    trend_hint: str
+    pain_score: float | None
     reason: str
     matched_text: str
     context_specific: bool
+    confidence: str
+    severity_basis: str
+
+
+def _normalize_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _extract_side(value: str) -> tuple[str, str]:
+    """Extract common left/right notation without treating 'l-spine' as laterality."""
+    text = _normalize_spaces(value.lower())
+    side = ""
+    left_prefix = re.search(r"^(?:l|lt)\s+(?!(?:spine|spinal)\b)(?=[a-z])", text)
+    right_prefix = re.search(r"^(?:r|rt)\s+(?!(?:spine|spinal)\b)(?=[a-z])", text)
+    if re.search(r"\bleft\b|\blt\.?\b", text) or left_prefix:
+        side = "left"
+    elif re.search(r"\bright\b|\brt\.?\b", text) or right_prefix:
+        side = "right"
+    text = re.sub(r"\b(?:left|right|bilateral|lt\.?|rt\.?)\b", " ", text)
+    if side:
+        text = re.sub(r"^(?:l|r)\s+(?!(?:spine|spinal)\b)(?=[a-z])", "", text)
+    return side, _normalize_spaces(text.strip(" -"))
 
 
 def canonical_body_part(raw_part: str) -> str:
-    """Normalize a body-part value while preserving documented laterality."""
-    value = re.sub(r"\s+", " ", str(raw_part).strip().lower())
-    side = ""
-    if re.search(r"\bleft\b", value):
-        side = "left"
-    elif re.search(r"\bright\b", value):
-        side = "right"
-    value = re.sub(r"\b(?:left|right|bilateral)\b", "", value).strip(" -")
-
-    if value in BODY_COORDINATES:
-        body = value
-    else:
-        body = next(
-            (
-                canonical
-                for alias, canonical in sorted(
-                    ALIAS_TO_BODY.items(), key=lambda item: len(item[0]), reverse=True
-                )
-                if re.search(rf"\b{re.escape(alias)}\b", value)
-            ),
-            value,
-        )
+    """Normalize body-part wording while preserving documented laterality."""
+    side, value = _extract_side(str(raw_part))
+    body = next(
+        (
+            canonical
+            for alias, canonical in SORTED_ALIASES
+            if re.search(rf"\b{re.escape(alias)}\b", value, re.I)
+        ),
+        value,
+    )
     return f"{side} {body}".strip()
 
 
-def marker_coordinates(body_part: str) -> list[tuple[float, float]]:
-    """Return normalized marker coordinates for a canonical body part."""
+def available_body_parts(df: pd.DataFrame) -> list[str]:
+    """Return canonical body parts present in a chronology."""
+    parts: set[str] = set()
+    if "body_parts" not in df.columns:
+        return []
+    for value in df["body_parts"].fillna("").astype(str):
+        for raw_part in split_multi_value(value, ","):
+            canonical = canonical_body_part(raw_part)
+            if canonical:
+                parts.add(canonical)
+    return sorted(parts)
+
+
+def marker_locations(body_part: str) -> list[BodyLocation]:
+    """Return front/back map locations; unknown anatomy returns no marker."""
     canonical = canonical_body_part(body_part)
     side = ""
     base = canonical
@@ -207,21 +255,51 @@ def marker_coordinates(body_part: str) -> list[tuple[float, float]]:
     elif canonical.startswith("right "):
         side, base = "right", canonical[6:]
 
-    if side == "left" and base in LEFT_COORDINATES:
-        return LEFT_COORDINATES[base]
-    if side == "right" and base in RIGHT_COORDINATES:
-        return RIGHT_COORDINATES[base]
-    return BODY_COORDINATES.get(base, [(50, 40)])
+    locations = BODY_COORDINATES.get(base, [])
+    if not side or len(locations) <= 1:
+        return locations
+
+    # Front view is mirrored to the viewer; back view is not.
+    location_view = locations[0].view
+    if side == "left":
+        chooser = max if location_view == "front" else min
+    else:
+        chooser = min if location_view == "front" else max
+    return [chooser(locations, key=lambda location: location.x)]
+
+
+def marker_coordinates(body_part: str) -> list[tuple[float, float]]:
+    """Compatibility helper used by tests and callers that only need x/y values."""
+    return [(location.x, location.y) for location in marker_locations(body_part)]
+
+
+def _sentence_mentions_side(sentence: str, side: str) -> bool:
+    if side == "left":
+        return bool(re.search(r"\bleft\b|\blt\.?\b", sentence, re.I))
+    if side == "right":
+        return bool(re.search(r"\bright\b|\brt\.?\b", sentence, re.I))
+    return False
+
+
+def _sentence_mentions_opposite_side(sentence: str, side: str) -> bool:
+    opposite = "right" if side == "left" else "left"
+    return _sentence_mentions_side(sentence, opposite)
 
 
 def _relevant_context(summary: str, body_part: str) -> tuple[str, bool]:
-    """Prefer sentences that mention the current body part or a synonym."""
+    """Return only sentences that mention this anatomy; never fall back to full text."""
     canonical = canonical_body_part(body_part)
-    base = re.sub(r"^(?:left|right) ", "", canonical)
+    side = ""
+    base = canonical
+    if canonical.startswith("left "):
+        side, base = "left", canonical[5:]
+    elif canonical.startswith("right "):
+        side, base = "right", canonical[6:]
+
     aliases = BODY_ALIASES.get(base, (base,))
     sentences = [
         sentence.strip()
-        for sentence in re.split(r"(?<=[.!?;])\s+", str(summary))
+        for sentence in re.split(r"(?<=[.!?;])\s+|\n+", str(summary))
         if sentence.strip()
     ]
     matching = [
@@ -229,28 +307,41 @@ def _relevant_context(summary: str, body_part: str) -> tuple[str, bool]:
         for sentence in sentences
         if any(re.search(rf"\b{re.escape(alias)}\b", sentence, re.I) for alias in aliases)
     ]
-    return (" ".join(matching), True) if matching else (str(summary), False)
+    if side and matching:
+        same_side = [sentence for sentence in matching if _sentence_mentions_side(sentence, side)]
+        if same_side:
+            matching = same_side
+        else:
+            matching = [
+                sentence for sentence in matching if not _sentence_mentions_opposite_side(sentence, side)
+            ]
+    if not matching:
+        return "", False
+    return " ".join(matching), True
 
 
 def _is_negated(text: str, start: int, end: int) -> bool:
-    before = text[max(0, start - 70) : start]
-    after = text[end : min(len(text), end + 40)]
+    before = text[max(0, start - 90) : start]
+    after = text[end : min(len(text), end + 50)]
     before_negation = re.search(
-        r"\b(?:no|not|without|denies|denied|negative for|absence of)"
-        r"(?:\W+\w+){0,5}\W*$",
+        r"\b(?:no|not|without|denies|denied|negative for|absence of|free of)"
+        r"(?:\W+\w+){0,6}\W*$",
         before,
         re.I,
     )
     after_negation = re.search(
-        r"^\W*(?:was |were |is |are )?(?:ruled out|not seen|not present|negative)",
+        r"^\W*(?:was |were |is |are )?(?:ruled out|not seen|not present|negative|absent)",
         after,
         re.I,
     )
     return bool(before_negation or after_negation)
 
 
-def _match_pattern(
-    text: str, patterns: tuple[tuple[str, str], ...], allow_negated: bool = False
+def _first_match(
+    text: str,
+    patterns: tuple[tuple[str, str], ...],
+    *,
+    allow_negated: bool = False,
 ) -> tuple[str, str] | None:
     for pattern, reason in patterns:
         for match in re.finditer(pattern, text, re.I):
@@ -259,220 +350,475 @@ def _match_pattern(
     return None
 
 
+def _severity_match(
+    text: str,
+    patterns: tuple[tuple[str, str, str], ...],
+) -> tuple[str, str, str] | None:
+    for pattern, reason, basis in patterns:
+        for match in re.finditer(pattern, text, re.I):
+            if not _is_negated(text, match.start(), match.end()):
+                return reason, match.group(0), basis
+    return None
+
+
+def _extract_current_pain_score(text: str) -> tuple[float | None, str]:
+    matches = list(PAIN_SCORE_RE.finditer(text))
+    if not matches:
+        return None, ""
+
+    # Prefer scores explicitly framed as current/today/now/reported/rated; otherwise
+    # use the first body-specific score rather than a later historical comparison.
+    ranked: list[tuple[int, int, re.Match[str]]] = []
+    for match in matches:
+        before = text[max(0, match.start() - 36) : match.start()].lower()
+        priority = 1
+        if re.search(r"\b(?:now|today|current(?:ly)?)\b", before):
+            priority = 3
+        elif re.search(r"\b(?:reports?|reported|rates?|rated)\b", before):
+            priority = 2
+        ranked.append((priority, -match.start(), match))
+    _, _, chosen = max(ranked, key=lambda item: (item[0], item[1]))
+    score = float(chosen.group(1))
+    if 0 <= score <= 10:
+        return score, chosen.group(0)
+    return None, ""
+
+
+def _pain_severity(score: float) -> int:
+    if score <= 0:
+        return 0
+    if score <= 3:
+        return 1
+    if score <= 6:
+        return 2
+    return 3
+
+
 def infer_severity(summary: str, body_part: str) -> Inference:
-    """Infer a status action for one body part from clinical summary text."""
+    """Infer body-specific severity and trend without borrowing unrelated sentences."""
     context, is_specific = _relevant_context(summary, body_part)
+    if not is_specific:
+        return Inference(
+            severity=None,
+            trend_hint="unknown",
+            pain_score=None,
+            reason="body part listed, but no body-specific severity statement was found",
+            matched_text="",
+            context_specific=False,
+            confidence="Low",
+            severity_basis="none",
+        )
 
-    match = _match_pattern(context, RESOLVED_PATTERNS, allow_negated=True)
-    if match:
-        return Inference("resolved", 0, match[0], match[1], is_specific)
+    resolved = _first_match(context, RESOLVED_PATTERNS, allow_negated=True)
+    if resolved:
+        return Inference(
+            severity=0,
+            trend_hint="resolved",
+            pain_score=0.0 if "0/10" in resolved[1] else None,
+            reason=resolved[0],
+            matched_text=context,
+            context_specific=True,
+            confidence="High",
+            severity_basis="resolved",
+        )
 
-    match = _match_pattern(context, IMPROVING_PATTERNS)
-    if match:
-        return Inference("improving", 1, match[0], match[1], is_specific)
+    improving = _first_match(context, IMPROVING_PATTERNS)
+    worsening = _first_match(context, WORSENING_PATTERNS)
+    stable = _first_match(context, STABLE_PATTERNS)
+    trend_hint = "unknown"
+    trend_reason = ""
+    if improving:
+        trend_hint, trend_reason = "improving", improving[0]
+    elif worsening:
+        trend_hint, trend_reason = "worsening", worsening[0]
+    elif stable:
+        trend_hint, trend_reason = "stable", stable[0]
 
-    match = _match_pattern(context, SEVERE_PATTERNS)
-    if match:
-        return Inference("severe", 3, match[0], match[1], is_specific)
+    pain_score, _ = _extract_current_pain_score(context)
+    candidates: list[tuple[int, str, str]] = []
+    if pain_score is not None:
+        candidates.append((_pain_severity(pain_score), f"pain score {pain_score:g}/10", "pain_score"))
 
-    match = _match_pattern(context, WORSENING_PATTERNS)
-    if match:
-        return Inference("worsening", 2, match[0], match[1], is_specific)
+    for level, patterns in ((3, SEVERE_PATTERNS), (2, MODERATE_PATTERNS), (1, MILD_PATTERNS)):
+        match = _severity_match(context, patterns)
+        if match:
+            candidates.append((level, match[0], match[2]))
 
-    match = _match_pattern(context, INJURY_PATTERNS)
-    if match:
-        return Inference("injury", 1, match[0], match[1], is_specific)
+    if not candidates:
+        reason = trend_reason or "body-specific statement found, but severity is not explicit"
+        return Inference(
+            severity=None,
+            trend_hint=trend_hint,
+            pain_score=pain_score,
+            reason=reason,
+            matched_text=context,
+            context_specific=True,
+            confidence="Medium" if trend_hint != "unknown" else "Low",
+            severity_basis="none",
+        )
 
+    severity, severity_reason, basis = max(candidates, key=lambda item: item[0])
+    reason_parts = [severity_reason]
+    if trend_reason and trend_reason != severity_reason:
+        reason_parts.append(trend_reason)
+    confidence = "High" if basis in {"pain_score", "descriptor", "structural", "resolved"} else "Medium"
     return Inference(
-        "injury",
-        1,
-        "body part listed; no explicit severity phrase found",
-        "",
-        is_specific,
+        severity=severity,
+        trend_hint=trend_hint,
+        pain_score=pain_score,
+        reason="; ".join(reason_parts),
+        matched_text=context,
+        context_specific=True,
+        confidence=confidence,
+        severity_basis=basis,
     )
 
 
 def extract_observations(
-    df: pd.DataFrame, medicine_type: str
+    df: pd.DataFrame,
+    body_part: str | None = None,
+    medicine_types: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> pd.DataFrame:
-    """Create one auditable severity observation per event and body part."""
-    selected = df[df["medicine_type"] == medicine_type].sort_values(
-        "encounter_date", ascending=True
-    )
+    """Create one auditable body-specific observation per source event."""
+    selected = df.copy()
+    if medicine_types is not None:
+        allowed = set(medicine_types)
+        selected = selected[selected["medicine_type"].isin(allowed)]
+    selected = selected.sort_values(["encounter_date", "event_id"], ascending=True)
+
+    selected_body = canonical_body_part(body_part) if body_part else None
     observations: list[dict[str, Any]] = []
     for event_order, (_, row) in enumerate(selected.iterrows()):
-        for raw_part in split_multi_value(str(row["body_parts"]), ","):
-            body_part = canonical_body_part(raw_part)
-            inference = infer_severity(str(row["summary"]), body_part)
+        event_parts: set[str] = set()
+        for raw_part in split_multi_value(str(row.get("body_parts", "")), ","):
+            canonical = canonical_body_part(raw_part)
+            if canonical:
+                event_parts.add(canonical)
+        if selected_body:
+            event_parts = {part for part in event_parts if part == selected_body}
+
+        for part_order, canonical in enumerate(sorted(event_parts)):
+            inference = infer_severity(str(row.get("summary", "")), canonical)
+            event_id = str(row.get("event_id", f"event-{event_order}"))
             observations.append(
                 {
+                    "observation_id": f"{event_id}:{canonical}:{part_order}",
                     "event_order": event_order,
                     "encounter_date": pd.Timestamp(row["encounter_date"]),
-                    "body_part": body_part,
-                    "suggested_action": inference.action,
-                    "suggested_level": inference.suggested_level,
+                    "event_id": event_id,
+                    "body_part": canonical,
+                    "medicine_type": str(row.get("medicine_type", "")),
+                    "record_type": str(row.get("record_type", "")),
+                    "primary_provider": str(row.get("primary_provider", "")),
+                    "facility": str(row.get("facility", "")),
+                    "pdf_url": str(row.get("pdf_url", "")),
+                    "summary": str(row.get("summary", "")),
+                    "suggested_severity": inference.severity,
+                    "suggested_trend": inference.trend_hint,
+                    "pain_score": inference.pain_score,
                     "reason": inference.reason,
                     "matched_text": inference.matched_text,
                     "context_specific": inference.context_specific,
-                    "summary": str(row["summary"]),
-                    "override": "Auto",
+                    "confidence": inference.confidence,
+                    "severity_basis": inference.severity_basis,
+                    "mapped": bool(marker_locations(canonical)),
+                    "severity_override": "Auto",
+                    "trend_override": "Auto",
                 }
             )
     return pd.DataFrame(observations)
 
 
-def _next_level(current: int, action: str) -> int:
-    if action == "resolved":
-        return 0
-    if action == "severe":
-        return 3
-    if action == "worsening":
-        return max(current, 2)
-    if action == "improving":
-        return max(1, current - 1) if current else 1
-    return current or 1
+def _override_severity(value: str, suggested: int | None) -> int | None:
+    mapping = {
+        "Mild": 1,
+        "Moderate": 2,
+        "Severe": 3,
+        "Resolved": 0,
+        "No severity update": None,
+    }
+    return mapping.get(value, suggested)
+
+
+def _override_trend(value: str, suggested: str) -> str:
+    mapping = {
+        "New": "new",
+        "Improving": "improving",
+        "Stable": "stable",
+        "Worsening": "worsening",
+        "Resolved": "resolved",
+        "Unknown": "unknown",
+    }
+    return mapping.get(value, suggested)
+
+
+def _trend_from_change(
+    previous_severity: int | None,
+    new_severity: int | None,
+    previous_pain: float | None,
+    new_pain: float | None,
+) -> str:
+    if previous_severity is None and new_severity not in (None, 0):
+        return "new"
+    if previous_pain is not None and new_pain is not None:
+        if new_pain < previous_pain:
+            return "improving"
+        if new_pain > previous_pain:
+            return "worsening"
+        return "stable"
+    if previous_severity is not None and new_severity is not None:
+        if new_severity < previous_severity:
+            return "improving"
+        if new_severity > previous_severity:
+            return "worsening"
+        return "stable"
+    return "unknown"
 
 
 def build_progression(observations: pd.DataFrame) -> tuple[list[dict[str, Any]], pd.DataFrame]:
-    """Apply inferred actions and overrides to produce changed-state snapshots."""
+    """Build event-level progression points with exact severity updates and independent trend."""
     if observations.empty:
         return [], pd.DataFrame()
 
-    current: dict[str, dict[str, Any]] = {}
+    ordered = observations.sort_values(["encounter_date", "event_order", "event_id"])
+    state: dict[str, dict[str, Any]] = {}
     snapshots: list[dict[str, Any]] = []
     change_rows: list[dict[str, Any]] = []
 
-    ordered = observations.sort_values(["encounter_date", "event_order"])
-    for event_date, date_group in ordered.groupby("encounter_date", sort=True):
-        date_changes: list[dict[str, Any]] = []
-        for _, observation in date_group.iterrows():
-            body_part = str(observation["body_part"])
-            old_level = int(current.get(body_part, {}).get("level", 0))
-            override = str(observation.get("override", "Auto"))
-            if override == "Resolved":
-                new_level, action = 0, "resolved"
-            elif override in ("Injury", "Worsening injury", "Severe injury"):
-                new_level = {"Injury": 1, "Worsening injury": 2, "Severe injury": 3}[override]
-                action = "manual override"
-            else:
-                action = str(observation["suggested_action"])
-                new_level = _next_level(old_level, action)
+    for _, observation in ordered.iterrows():
+        body_part = str(observation["body_part"])
+        previous = state.get(body_part, {})
+        previous_severity = previous.get("severity")
+        previous_pain = previous.get("pain_score")
 
-            if new_level == old_level:
-                continue
+        severity = _override_severity(
+            str(observation.get("severity_override", "Auto")),
+            observation.get("suggested_severity"),
+        )
+        suggested_trend = str(observation.get("suggested_trend", "unknown"))
+        trend = _override_trend(str(observation.get("trend_override", "Auto")), suggested_trend)
 
-            reason = (
-                f"Manual override: {override}"
-                if override != "Auto"
-                else str(observation["reason"])
-            )
-            if new_level == 0:
-                current.pop(body_part, None)
-                status = "Resolved"
-            else:
-                current[body_part] = {
-                    "level": new_level,
-                    "reason": reason,
-                    "date": pd.Timestamp(event_date),
-                }
-                status = SEVERITY_LABELS[new_level]
+        # A generic symptom can establish or increase severity, but it should not
+        # silently downgrade a prior stronger state without numeric/explicit evidence.
+        basis = str(observation.get("severity_basis", "none"))
+        if (
+            severity is not None
+            and previous_severity is not None
+            and severity < previous_severity
+            and basis in {"generic_symptom", "functional"}
+            and str(observation.get("severity_override", "Auto")) == "Auto"
+            and trend != "improving"
+        ):
+            severity = previous_severity
 
-            change = {
-                "Date": pd.Timestamp(event_date),
-                "Body Part": body_part.title(),
-                "Previous Status": SEVERITY_LABELS.get(old_level, "Not shown"),
-                "New Status": status,
-                "Reason": reason,
-                "Matched Text": str(observation.get("matched_text", "")),
+        if trend == "resolved" or severity == 0:
+            severity = 0
+            trend = "resolved"
+        elif trend == "unknown":
+            trend = _trend_from_change(previous_severity, severity, previous_pain, observation.get("pain_score"))
+
+        # Trend-only observations retain the prior severity rather than inventing one.
+        effective_severity = severity
+        if effective_severity is None and previous_severity is not None and trend in {
+            "improving",
+            "stable",
+            "worsening",
+        }:
+            effective_severity = previous_severity
+
+        if effective_severity is None and previous_severity is None:
+            # Keep the low-confidence/unknown observation in the review table only.
+            continue
+
+        new_pain = observation.get("pain_score")
+        effective_pain = new_pain if pd.notna(new_pain) else previous_pain
+        severity_changed = effective_severity != previous_severity
+        pain_changed = (
+            new_pain is not None
+            and pd.notna(new_pain)
+            and previous_pain is not None
+            and float(new_pain) != float(previous_pain)
+        )
+        meaningful_trend = trend in {"new", "improving", "worsening", "resolved"}
+        first_known = previous_severity is None and effective_severity is not None
+
+        if effective_severity == 0:
+            state.pop(body_part, None)
+        else:
+            state[body_part] = {
+                "severity": int(effective_severity),
+                "pain_score": effective_pain,
             }
-            date_changes.append(change)
-            change_rows.append(change)
 
-        if date_changes:
-            snapshots.append(
-                {
-                    "date": pd.Timestamp(event_date),
-                    "statuses": {
-                        body_part: details.copy()
-                        for body_part, details in current.items()
-                    },
-                    "changes": date_changes,
-                }
-            )
+        if not (severity_changed or pain_changed or meaningful_trend or first_known):
+            continue
+
+        severity_label = SEVERITY_LABELS[int(effective_severity)]
+        previous_label = (
+            SEVERITY_LABELS[int(previous_severity)] if previous_severity is not None else "Not established"
+        )
+        snapshot = {
+            "date": pd.Timestamp(observation["encounter_date"]),
+            "body_part": body_part,
+            "severity": int(effective_severity),
+            "trend": trend,
+            "pain_score": float(new_pain) if new_pain is not None and pd.notna(new_pain) else None,
+            "event_id": str(observation.get("event_id", "")),
+            "medicine_type": str(observation.get("medicine_type", "")),
+            "record_type": str(observation.get("record_type", "")),
+            "primary_provider": str(observation.get("primary_provider", "")),
+            "facility": str(observation.get("facility", "")),
+            "pdf_url": str(observation.get("pdf_url", "")),
+            "reason": str(observation.get("reason", "")),
+            "matched_text": str(observation.get("matched_text", "")),
+            "confidence": str(observation.get("confidence", "")),
+            "mapped": bool(observation.get("mapped", False)),
+        }
+        snapshots.append(snapshot)
+        change_rows.append(
+            {
+                "Date": snapshot["date"],
+                "Event ID": snapshot["event_id"],
+                "Body Part": body_part.title(),
+                "Previous Severity": previous_label,
+                "Severity": severity_label,
+                "Trend": TREND_LABELS.get(trend, trend.title()),
+                "Pain Score": snapshot["pain_score"],
+                "Medicine Type": snapshot["medicine_type"],
+                "Provider": snapshot["primary_provider"],
+                "Facility": snapshot["facility"],
+                "Confidence": snapshot["confidence"],
+                "Evidence": snapshot["matched_text"],
+                "Reason": snapshot["reason"],
+                "PDF": snapshot["pdf_url"],
+            }
+        )
 
     return snapshots, pd.DataFrame(change_rows)
 
 
-def _image_data_uri(image_bytes: bytes | None, mime_type: str | None) -> str:
-    if image_bytes:
-        encoded = base64.b64encode(image_bytes).decode("ascii")
-        mime = mime_type if mime_type in ("image/png", "image/jpeg") else "image/png"
-        return f"data:{mime};base64,{encoded}"
-    encoded = base64.b64encode(DEFAULT_BODY_SVG.encode("utf-8")).decode("ascii")
+def _image_data_uri() -> str:
+    encoded = base64.b64encode(BODY_SVG.encode("utf-8")).decode("ascii")
     return f"data:image/svg+xml;base64,{encoded}"
 
 
-def render_progression_html(
-    snapshots: list[dict[str, Any]],
-    image_bytes: bytes | None = None,
-    mime_type: str | None = None,
-) -> str:
-    """Render progression snapshots as a horizontally scrollable HTML timeline."""
-    image_uri = _image_data_uri(image_bytes, mime_type)
-    cards: list[str] = []
-    for snapshot in snapshots:
-        markers: list[str] = []
-        for body_part, status in snapshot["statuses"].items():
-            level = int(status["level"])
-            color = SEVERITY_COLORS[level]
-            tooltip = html.escape(
-                f"{body_part.title()}: {SEVERITY_LABELS[level]} — {status['reason']}",
-                quote=True,
-            )
-            for x_coord, y_coord in marker_coordinates(body_part):
-                markers.append(
-                    f'<span class="marker level-{level}" style="left:{x_coord}%;'
-                    f'top:{y_coord}%;background:{color}" title="{tooltip}"></span>'
-                )
+def _safe_url(value: str) -> str:
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ""
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return value
+    return ""
 
-        date_label = pd.Timestamp(snapshot["date"]).strftime("%b %d, %Y")
-        change_count = len(snapshot["changes"])
-        cards.append(
-            '<div class="timepoint">'
-            '<div class="body-frame">'
-            f'<img src="{image_uri}" alt="Body outline"/>'
-            f'{"".join(markers)}'
-            "</div>"
-            f'<div class="date">{html.escape(date_label)}</div>'
-            f'<div class="change-count">{change_count} change{"s" if change_count != 1 else ""}</div>'
-            '<div class="tick"></div>'
-            "</div>"
+
+def _marker_html(body_part: str, severity: int, tooltip: str) -> tuple[str, str]:
+    front: list[str] = []
+    back: list[str] = []
+    for location in marker_locations(body_part):
+        color = SEVERITY_COLORS[severity]
+        content = "✓" if severity == 0 else ""
+        marker = (
+            f'<span class="marker severity-{severity}" style="left:{location.x}%;top:{location.y}%;'
+            f'background:{color}" title="{html.escape(tooltip, quote=True)}">{content}</span>'
+        )
+        (front if location.view == "front" else back).append(marker)
+    return "".join(front), "".join(back)
+
+
+def render_progression_html(snapshots: list[dict[str, Any]]) -> str:
+    """Render progression on a horizontally scrollable, date-proportional axis."""
+    if not snapshots:
+        return "<p>No progression points.</p>"
+
+    ordered = sorted(snapshots, key=lambda item: (pd.Timestamp(item["date"]), item["event_id"]))
+    dates = [pd.Timestamp(item["date"]) for item in ordered]
+    min_date, max_date = min(dates), max(dates)
+    span_days = max(1, (max_date - min_date).days)
+    canvas_width = max(1050, min(5200, 360 + span_days * 8))
+    usable_width = canvas_width - 260
+    lane_count = 3
+    lane_height = 265
+    axis_y = 28 + lane_count * lane_height
+    canvas_height = axis_y + 80
+
+    image_uri = _image_data_uri()
+    points: list[str] = []
+    for index, snapshot in enumerate(ordered):
+        date = pd.Timestamp(snapshot["date"])
+        day_offset = (date - min_date).days
+        x_pos = 130 + (day_offset / span_days) * usable_width if span_days else canvas_width / 2
+        lane = index % lane_count
+        top = 10 + lane * lane_height
+        severity = int(snapshot["severity"])
+        trend = str(snapshot["trend"])
+        pain_score = snapshot.get("pain_score")
+        pain_label = f"{float(pain_score):g}/10" if pain_score is not None else "—"
+        severity_label = SEVERITY_LABELS[severity]
+        trend_label = TREND_LABELS.get(trend, trend.title())
+        tooltip = (
+            f"{snapshot['body_part'].title()} — {severity_label}; {trend_label}. "
+            f"{snapshot.get('reason', '')}"
+        )
+        front_markers, back_markers = _marker_html(snapshot["body_part"], severity, tooltip)
+        mapped_note = "" if snapshot.get("mapped") else '<div class="unmapped">Unmapped anatomy — no body marker</div>'
+        source_url = _safe_url(str(snapshot.get("pdf_url", "")))
+        source_link = (
+            f'<a class="source-link" href="{html.escape(source_url, quote=True)}" target="_blank" rel="noopener">View source</a>'
+            if source_url
+            else ""
+        )
+        evidence = html.escape(str(snapshot.get("matched_text", "")))
+        points.append(
+            f'<div class="timepoint" style="left:{x_pos:.1f}px;top:{top}px">'
+            '<div class="body-pair">'
+            f'<div class="body-panel"><div class="view-label">Front</div><img src="{image_uri}" alt="Front body outline"/>{front_markers}</div>'
+            f'<div class="body-panel"><div class="view-label">Back</div><img src="{image_uri}" alt="Back body outline"/>{back_markers}</div>'
+            '</div>'
+            f'<div class="date">{date.strftime("%b %d, %Y")}</div>'
+            f'<div class="status"><strong>{severity_label}</strong> <span class="trend">{TREND_SYMBOLS.get(trend, "?")} {trend_label}</span></div>'
+            f'<div class="meta">Pain: {pain_label} · {html.escape(str(snapshot.get("event_id", "")))}</div>'
+            f'<div class="meta">{html.escape(str(snapshot.get("medicine_type", "")))}</div>'
+            f'{mapped_note}{source_link}'
+            f'<div class="evidence" title="{html.escape(evidence, quote=True)}">{evidence[:150]}{"…" if len(evidence) > 150 else ""}</div>'
+            '</div>'
+            f'<div class="stem" style="left:{x_pos:.1f}px;top:{top + 238}px;height:{max(12, axis_y - (top + 238))}px"></div>'
+            f'<div class="axis-tick" style="left:{x_pos:.1f}px;top:{axis_y - 5}px"></div>'
         )
 
     return f"""<!doctype html>
 <html><head><style>
-* {{ box-sizing: border-box; }}
-body {{ margin: 0; color: #1f2937; font-family: Arial, sans-serif; }}
-.legend {{ display:flex; gap:18px; align-items:center; margin:4px 6px 14px; font-size:13px; }}
-.legend-item {{ display:flex; align-items:center; gap:6px; }}
-.swatch {{ width:13px; height:13px; border-radius:50%; border:1px solid rgba(0,0,0,.25); }}
-.scroll {{ overflow-x:auto; padding:4px 8px 22px; }}
-.timeline {{ display:flex; align-items:flex-end; min-width:max-content; position:relative; padding-bottom:20px; }}
-.timeline::after {{ content:""; position:absolute; left:0; right:0; bottom:17px; height:3px; background:#64748b; z-index:0; }}
-.timepoint {{ width:185px; flex:0 0 185px; text-align:center; position:relative; padding:0 10px 21px; }}
-.body-frame {{ width:145px; height:220px; margin:0 auto 7px; position:relative; }}
-.body-frame img {{ width:100%; height:100%; object-fit:contain; display:block; }}
-.marker {{ position:absolute; width:15px; height:15px; border-radius:50%; transform:translate(-50%,-50%);
-  border:2px solid rgba(255,255,255,.95); box-shadow:0 0 0 1px rgba(0,0,0,.5), 0 1px 4px rgba(0,0,0,.35); cursor:help; }}
-.date {{ font-size:13px; font-weight:700; white-space:nowrap; }}
-.change-count {{ font-size:11px; color:#64748b; margin-top:2px; }}
-.tick {{ position:absolute; bottom:10px; left:50%; width:3px; height:15px; background:#334155; z-index:1; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; color:#1f2937; font-family:Arial,sans-serif; background:white; }}
+.legend {{ display:flex; flex-wrap:wrap; gap:14px; align-items:center; margin:4px 8px 12px; font-size:13px; }}
+.legend-item {{ display:flex; align-items:center; gap:5px; }}
+.swatch {{ width:13px; height:13px; border-radius:50%; border:1px solid rgba(0,0,0,.3); }}
+.scroll {{ overflow-x:auto; overflow-y:hidden; padding:4px 8px 16px; }}
+.canvas {{ position:relative; width:{canvas_width}px; height:{canvas_height}px; min-width:{canvas_width}px; }}
+.axis {{ position:absolute; left:20px; right:20px; top:{axis_y}px; height:3px; background:#64748b; }}
+.timepoint {{ position:absolute; width:220px; height:238px; transform:translateX(-50%); text-align:center; background:#fff; border:1px solid #dbe3ec; border-radius:10px; padding:5px 7px 7px; box-shadow:0 1px 5px rgba(15,23,42,.12); z-index:2; }}
+.body-pair {{ display:flex; justify-content:center; gap:3px; height:132px; }}
+.body-panel {{ width:82px; height:128px; position:relative; }}
+.view-label {{ position:absolute; top:0; left:0; right:0; text-align:center; font-size:9px; color:#64748b; z-index:3; }}
+.body-panel img {{ width:100%; height:100%; object-fit:contain; display:block; }}
+.marker {{ position:absolute; width:16px; height:16px; border-radius:50%; transform:translate(-50%,-50%); border:2px solid rgba(255,255,255,.95); box-shadow:0 0 0 1px rgba(0,0,0,.55); color:white; font-size:11px; line-height:12px; font-weight:700; cursor:help; z-index:4; }}
+.date {{ font-size:12px; font-weight:700; white-space:nowrap; margin-top:1px; }}
+.status {{ font-size:12px; margin-top:2px; }}
+.trend {{ margin-left:5px; color:#334155; }}
+.meta {{ font-size:10.5px; color:#64748b; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.unmapped {{ font-size:10px; color:#b45309; font-weight:700; }}
+.source-link {{ font-size:10.5px; margin-right:6px; }}
+.evidence {{ font-size:9.5px; color:#475569; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+.stem {{ position:absolute; width:2px; background:#94a3b8; transform:translateX(-50%); z-index:1; }}
+.axis-tick {{ position:absolute; width:3px; height:13px; background:#334155; transform:translateX(-50%); z-index:1; }}
 </style></head><body>
 <div class="legend">
   <strong>Severity:</strong>
-  <span class="legend-item"><span class="swatch" style="background:{SEVERITY_COLORS[1]}"></span>Injury</span>
-  <span class="legend-item"><span class="swatch" style="background:{SEVERITY_COLORS[2]}"></span>Worsening</span>
+  <span class="legend-item"><span class="swatch" style="background:{SEVERITY_COLORS[1]}"></span>Mild</span>
+  <span class="legend-item"><span class="swatch" style="background:{SEVERITY_COLORS[2]}"></span>Moderate</span>
   <span class="legend-item"><span class="swatch" style="background:{SEVERITY_COLORS[3]}"></span>Severe</span>
+  <span class="legend-item"><span class="swatch" style="background:{SEVERITY_COLORS[0]}"></span>Resolved</span>
+  <span class="legend-item"><strong>Trend:</strong> ↑ worsening · → stable · ↓ improving · ✓ resolved</span>
 </div>
-<div class="scroll"><div class="timeline">{"".join(cards)}</div></div>
+<div class="scroll"><div class="canvas"><div class="axis"></div>{"".join(points)}</div></div>
 </body></html>"""
