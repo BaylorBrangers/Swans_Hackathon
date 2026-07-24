@@ -11,6 +11,7 @@ from data_loader import (
     unique_body_parts,
     unique_providers,
 )
+from summarizer import summarize_events
 
 SUMMARY_TRUNCATE = 120
 PLOT_FIELDS = {
@@ -20,6 +21,13 @@ PLOT_FIELDS = {
     "Primary Provider": ("primary_provider", ";"),
     "Body Parts": ("body_parts", ","),
 }
+SUMMARY_FOCUS_OPTIONS = [
+    "Overall medical history",
+    "Diagnoses and conditions",
+    "Medications and treatment changes",
+    "Procedures and investigations",
+    "Hospital and emergency encounters",
+]
 
 
 @st.cache_data(show_spinner="Parsing chronology...")
@@ -56,6 +64,7 @@ def render_upload_section() -> bool:
         if st.button("Clear", use_container_width=True):
             st.session_state.pop("xlsx_bytes", None)
             st.session_state.pop("xlsx_name", None)
+            st.session_state.pop("generated_summary", None)
             parse_uploaded_xlsx.clear()
             st.rerun()
 
@@ -155,6 +164,7 @@ def render_table_view(df: pd.DataFrame) -> None:
 
     table_df = display[
         [
+            "event_id",
             "encounter_date",
             "primary_provider",
             "facility",
@@ -166,6 +176,7 @@ def render_table_view(df: pd.DataFrame) -> None:
         ]
     ].rename(
         columns={
+            "event_id": "Event ID",
             "encounter_date": "Date",
             "primary_provider": "Provider",
             "facility": "Facility",
@@ -204,7 +215,7 @@ def render_timeline_view(df: pd.DataFrame) -> None:
         label = pd.Timestamp(event_date).strftime("%A, %B %d, %Y")
         with st.expander(f"{label} ({len(group)} event{'s' if len(group) != 1 else ''})", expanded=False):
             for _, row in group.iterrows():
-                st.markdown(f"**{row['record_type']}** · {row['medicine_type']}")
+                st.markdown(f"**{row['event_id']} · {row['record_type']}** · {row['medicine_type']}")
                 st.caption(f"{row['primary_provider']} · {row['facility']}")
                 if row["body_parts"]:
                     st.markdown(f"**Body parts:** {row['body_parts']}")
@@ -240,13 +251,9 @@ def build_event_plot_data(
     if time_grouping == "Day":
         plot_df["period"] = plot_df["encounter_date"].dt.floor("D")
     elif time_grouping == "Week":
-        plot_df["period"] = (
-            plot_df["encounter_date"].dt.to_period("W").dt.start_time
-        )
+        plot_df["period"] = plot_df["encounter_date"].dt.to_period("W").dt.start_time
     else:
-        plot_df["period"] = (
-            plot_df["encounter_date"].dt.to_period("M").dt.start_time
-        )
+        plot_df["period"] = plot_df["encounter_date"].dt.to_period("M").dt.start_time
 
     chart_data = (
         plot_df.groupby(["period", "value"])
@@ -327,6 +334,87 @@ def render_chart_view(df: pd.DataFrame) -> None:
         )
 
 
+def _summary_config() -> tuple[str, str]:
+    try:
+        config = st.secrets.get("summarization", {})
+        return str(config.get("endpoint_url", "")), str(config.get("api_token", ""))
+    except FileNotFoundError:
+        return "", ""
+
+
+def render_summary_view(df: pd.DataFrame) -> None:
+    """Generate a grounded summary of the currently filtered events."""
+    st.subheader("Medical summary")
+    st.caption(
+        f"The model will summarize the {len(df)} events currently selected by the sidebar filters. "
+        "Generated text is not medical advice and should be checked against the cited source events."
+    )
+
+    focus = st.selectbox("Summary focus", SUMMARY_FOCUS_OPTIONS)
+    custom_focus = st.text_input(
+        "Optional custom focus",
+        placeholder="e.g. shoulder injury history and treatment progression",
+    )
+    requested_focus = custom_focus.strip() or focus
+
+    endpoint_url, api_token = _summary_config()
+    if not endpoint_url:
+        st.warning(
+            "Summarization is not configured. Add `[summarization]` secrets with "
+            "`endpoint_url` and `api_token` for a Hugging Face Inference Endpoint running MedGemma 4B IT."
+        )
+        return
+
+    if st.button("Generate summary", type="primary"):
+        try:
+            with st.spinner("Generating grounded medical summary..."):
+                st.session_state["generated_summary"] = summarize_events(
+                    df,
+                    endpoint_url=endpoint_url,
+                    api_token=api_token,
+                    focus=requested_focus,
+                )
+                st.session_state["generated_summary_focus"] = requested_focus
+        except Exception as exc:
+            st.error(f"Summary generation failed: {exc}")
+
+    summary = st.session_state.get("generated_summary")
+    if summary:
+        st.markdown(f"**Focus:** {st.session_state.get('generated_summary_focus', requested_focus)}")
+        st.markdown(summary)
+        st.download_button(
+            "Download summary",
+            data=summary.encode("utf-8"),
+            file_name="medical_summary.md",
+            mime="text/markdown",
+        )
+
+        with st.expander("Source events for citation checking"):
+            source_df = df[
+                ["event_id", "encounter_date", "record_type", "primary_provider", "facility", "summary", "pdf_url"]
+            ].copy()
+            source_df["encounter_date"] = source_df["encounter_date"].dt.strftime("%m/%d/%Y")
+            source_df = source_df.rename(
+                columns={
+                    "event_id": "Event ID",
+                    "encounter_date": "Date",
+                    "record_type": "Record Type",
+                    "primary_provider": "Provider",
+                    "facility": "Facility",
+                    "summary": "Source narrative",
+                    "pdf_url": "PDF",
+                }
+            )
+            st.dataframe(
+                source_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "PDF": st.column_config.LinkColumn("View PDF", display_text="View PDF"),
+                },
+            )
+
+
 def main() -> None:
     st.set_page_config(page_title="Medical Chronology", layout="wide")
     st.title("Medical Chronology")
@@ -360,13 +448,17 @@ def main() -> None:
         st.info("No events match the current filters.")
         return
 
-    table_tab, timeline_tab, chart_tab = st.tabs(["Table", "Timeline", "Charts"])
+    table_tab, timeline_tab, chart_tab, summary_tab = st.tabs(
+        ["Table", "Timeline", "Charts", "Summary"]
+    )
     with table_tab:
         render_table_view(filtered)
     with timeline_tab:
         render_timeline_view(filtered)
     with chart_tab:
         render_chart_view(filtered)
+    with summary_tab:
+        render_summary_view(filtered)
 
 
 if __name__ == "__main__":
