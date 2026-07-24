@@ -1,109 +1,155 @@
-"""Grounded hierarchical summarization for medical chronology events."""
+"""Hierarchical medical-record summarization through Hugging Face Inference."""
 
 from __future__ import annotations
-
-from collections.abc import Iterable
 
 import pandas as pd
 from huggingface_hub import InferenceClient
 
-DEFAULT_MODEL = "google/medgemma-4b-it"
-MAX_CHUNK_CHARS = 12_000
-
-SYSTEM_PROMPT = """You summarize longitudinal medical records for review.
-Use ONLY facts explicitly present in the supplied events. Do not infer diagnoses,
-causes, indications, treatment rationale, or outcomes. Preserve chronology.
-Every factual statement must cite one or more supporting event IDs in square
-brackets, for example [E000123]. If records conflict, state the conflict and cite
-both sources. If a fact is unknown, say it is unknown. Do not provide medical advice.
-"""
+DEFAULT_MODEL = "Falconsai/medical_summarization"
+# The model tokenizer has a 512-token limit. A conservative character limit keeps
+# most requests below that boundary without adding a tokenizer dependency.
+MAX_CHUNK_CHARS = 1_600
+MAX_REDUCTION_ROUNDS = 8
 
 
 def _event_text(row: pd.Series) -> str:
-    return (
-        f"[{row['event_id']}]\n"
-        f"Date: {row['encounter_date'].strftime('%Y-%m-%d')}\n"
-        f"Record type: {row['record_type']}\n"
-        f"Medicine type: {row['medicine_type']}\n"
-        f"Provider: {row['primary_provider']}\n"
-        f"Facility: {row['facility']}\n"
-        f"Body parts: {row['body_parts']}\n"
-        f"Narrative: {row['summary']}"
-    )
+    """Convert one chronology row to compact, human-readable source text."""
+    metadata = [
+        row["encounter_date"].strftime("%Y-%m-%d"),
+        row["record_type"],
+        row["medicine_type"],
+        row["primary_provider"],
+        row["facility"],
+    ]
+    header = " | ".join(str(value).strip() for value in metadata if str(value).strip())
+    body_parts = str(row["body_parts"]).strip()
+    narrative = str(row["summary"]).strip()
+    parts = [header]
+    if body_parts:
+        parts.append(f"Body parts: {body_parts}")
+    if narrative:
+        parts.append(narrative)
+    return ". ".join(part for part in parts if part)
 
 
-def _chunk_events(df: pd.DataFrame, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+def _split_text(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+    """Split long text into approximately sentence-aligned chunks."""
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_chars:
+        split_at = remaining.rfind(". ", 0, max_chars)
+        if split_at < max_chars // 2:
+            split_at = remaining.rfind(" ", 0, max_chars)
+        if split_at < max_chars // 2:
+            split_at = max_chars
+        chunk = remaining[:split_at].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip(". ")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _chunk_events(df: pd.DataFrame) -> list[str]:
+    """Group chronology events into model-sized chronological text chunks."""
+    pieces: list[str] = []
+    ordered = df.sort_values("encounter_date", ascending=True)
+    for _, row in ordered.iterrows():
+        pieces.extend(_split_text(_event_text(row)))
+
     chunks: list[str] = []
     current: list[str] = []
     current_chars = 0
-
-    ordered = df.sort_values("encounter_date", ascending=True)
-    for _, row in ordered.iterrows():
-        event = _event_text(row)
-        if current and current_chars + len(event) > max_chars:
+    for piece in pieces:
+        separator_chars = 2 if current else 0
+        if current and current_chars + separator_chars + len(piece) > MAX_CHUNK_CHARS:
             chunks.append("\n\n".join(current))
             current = []
             current_chars = 0
-        current.append(event)
-        current_chars += len(event)
+        current.append(piece)
+        current_chars += separator_chars + len(piece)
 
     if current:
         chunks.append("\n\n".join(current))
     return chunks
 
 
-def _complete(client: InferenceClient, prompt: str, max_tokens: int = 1400) -> str:
-    response = client.chat_completion(
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.1,
-        max_tokens=max_tokens,
+def _summarize_text(client: InferenceClient, text: str) -> str:
+    """Summarize one model-sized text block."""
+    result = client.summarization(
+        text,
+        model=DEFAULT_MODEL,
+        truncation="longest_first",
     )
-    content = response.choices[0].message.content
-    if not content:
-        raise RuntimeError("The inference endpoint returned an empty response.")
-    return content.strip()
+    summary = getattr(result, "summary_text", None)
+    if summary is None and isinstance(result, dict):
+        summary = result.get("summary_text")
+    if not summary:
+        summary = str(result).strip()
+    if not summary:
+        raise RuntimeError("Hugging Face returned an empty summary.")
+    return summary.strip()
+
+
+def _reduce_summaries(client: InferenceClient, summaries: list[str]) -> str:
+    """Recursively summarize intermediate outputs until one summary remains."""
+    current = summaries
+    for _ in range(MAX_REDUCTION_ROUNDS):
+        if len(current) == 1:
+            return current[0]
+
+        combined = "\n\n".join(current)
+        chunks = _split_text(combined)
+        next_round = [_summarize_text(client, chunk) for chunk in chunks]
+
+        # Guard against a pathological case where reduction does not shrink the
+        # number of chunks. Join adjacent summaries before trying again.
+        if len(next_round) >= len(current) and len(next_round) > 1:
+            paired: list[str] = []
+            for index in range(0, len(next_round), 2):
+                paired.append(" ".join(next_round[index : index + 2]))
+            current = paired
+        else:
+            current = next_round
+
+    return "\n\n".join(current)
 
 
 def summarize_events(
     df: pd.DataFrame,
     *,
-    endpoint_url: str,
     api_token: str,
-    focus: str = "Overall medical history",
+    endpoint_url: str = "",
+    focus: str = "",
 ) -> str:
-    """Summarize filtered chronology events using map-reduce with event citations."""
+    """Summarize filtered chronology events using HF's serverless API.
+
+    ``endpoint_url`` and ``focus`` are accepted for backward compatibility with
+    the first MedGemma prototype; they are intentionally unused by this task-
+    specific summarization model.
+    """
+    del endpoint_url, focus
+
     if df.empty:
         raise ValueError("No events were supplied for summarization.")
-    if not endpoint_url.strip():
-        raise ValueError("A Hugging Face Inference Endpoint URL is required.")
+    if not api_token.strip():
+        raise ValueError("A Hugging Face API token is required.")
 
-    client = InferenceClient(base_url=endpoint_url.strip(), api_key=api_token or None, timeout=180)
-    chunks = _chunk_events(df)
-
-    partials: list[str] = []
-    for index, chunk in enumerate(chunks, start=1):
-        prompt = f"""Create a concise factual summary for the requested focus: {focus}.
-This is source chunk {index} of {len(chunks)}. Retain dates, diagnoses, treatments,
-medications, investigations, procedures, material changes, and explicitly documented
-status when relevant to the focus. Cite every statement with event IDs.
-
-SOURCE EVENTS:\n{chunk}"""
-        partials.append(_complete(client, prompt))
-
-    if len(partials) == 1:
-        return partials[0]
-
-    combined = "\n\n".join(
-        f"INTERMEDIATE SUMMARY {i}\n{text}" for i, text in enumerate(partials, start=1)
+    client = InferenceClient(
+        provider="hf-inference",
+        api_key=api_token.strip(),
+        timeout=180,
     )
-    final_prompt = f"""Synthesize the intermediate summaries below into one longitudinal
-medical summary focused on: {focus}.
+    chunks = _chunk_events(df)
+    if not chunks:
+        raise ValueError("The selected events contain no text to summarize.")
 
-Remove duplication, preserve chronology, retain the original [E...] citations,
-and do not introduce facts not present in the intermediate summaries.
-
-{combined}"""
-    return _complete(client, final_prompt, max_tokens=1800)
+    partials = [_summarize_text(client, chunk) for chunk in chunks]
+    return _reduce_summaries(client, partials)
