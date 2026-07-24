@@ -11,6 +11,7 @@ from data_loader import (
     unique_body_parts,
     unique_providers,
 )
+from event_timeline import render_event_timeline_chart
 from summarizer import DEFAULT_MODEL, summarize_events
 
 SUMMARY_TRUNCATE = 120
@@ -149,11 +150,10 @@ def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         ]
 
     sort_newest_first = st.sidebar.toggle("Newest first", value=True)
-    filtered = filtered.sort_values(
+    return filtered.sort_values(
         "encounter_date",
         ascending=not sort_newest_first,
     ).reset_index(drop=True)
-    return filtered
 
 
 def render_table_view(df: pd.DataFrame) -> None:
@@ -203,17 +203,16 @@ def render_table_view(df: pd.DataFrame) -> None:
         },
     )
 
-    csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Export filtered results to CSV",
-        data=csv,
+        data=df.to_csv(index=False).encode("utf-8"),
         file_name="medical_chronology_filtered.csv",
         mime="text/csv",
     )
 
 
 def render_timeline_view(df: pd.DataFrame) -> None:
-    """Render events grouped by encounter date."""
+    """Render events grouped by encounter date as expandable text records."""
     if df.empty:
         st.info("No events match the current filters.")
         return
@@ -279,7 +278,7 @@ def build_event_plot_data(
 
 def render_chart_view(df: pd.DataFrame) -> None:
     """Render an interactive event-count chart from selected field values."""
-    st.subheader("Plot events")
+    st.subheader("Plot event counts")
     st.caption(
         "Choose a field and values to compare event counts over time. "
         "Events with multiple providers or body parts count once for each matching value."
@@ -483,13 +482,15 @@ def main() -> None:
         st.info("No events match the current filters.")
         return
 
-    table_tab, timeline_tab, chart_tab, summary_tab = st.tabs(
-        ["Table", "Timeline", "Charts", "Summary"]
+    table_tab, timeline_tab, visual_timeline_tab, chart_tab, summary_tab = st.tabs(
+        ["Table", "Timeline", "Visual Timeline", "Charts", "Summary"]
     )
     with table_tab:
         render_table_view(filtered)
     with timeline_tab:
         render_timeline_view(filtered)
+    with visual_timeline_tab:
+        render_event_timeline_chart(filtered)
     with chart_tab:
         render_chart_view(filtered)
     with summary_tab:
