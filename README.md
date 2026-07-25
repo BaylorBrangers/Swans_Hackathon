@@ -1,38 +1,60 @@
 # Medical Records Streamlit App
 
-Streamlit webapp for personal injury lawyers to visualize, search, and summarize medical chronology events from Excel.
+Streamlit web application for personal injury lawyers to visualize, search, summarize, and analyze medical chronology events from Excel files.
 
 ## Features
 
-- **Drag-and-drop upload** — drop an xlsx file to load data immediately
+- **Drag-and-drop upload** for medical chronology `.xlsx` files
 - Extracts embedded PDF hyperlinks from Excel cells
-- Filterable sidebar: date range, record type, medicine type, facility, provider, body parts, and free-text search
+- Filterable sidebar for dates, record type, medicine type, facility, provider, body parts, and free-text search
 - **Table** view with stable event IDs, truncated narratives, and CSV export
-- **Timeline** view grouped by encounter date with full narratives and PDF links
-- **Charts** view for plotting selected record types, medicine types, facilities, providers, or body parts by day, week, or month
-- **Injury Progression** view with source-linked front/back body maps, separate severity and trend, confidence review, and manual overrides
-- Google Drive auto-load (optional, configure later via Streamlit secrets)
-- **Summary** view using `Falconsai/medical_summarization` through the Hugging Face serverless Inference API
-- Recursive chunk-and-summarize handling for chronologies larger than the model input window
+- **Timeline** view grouped by encounter date with narratives and PDF links
+- **Charts** view for plotting selected event fields over time
+- **Injury Progression** view with deterministic severity/trend inference, source-linked body maps, confidence review, and manual overrides
+- **Summary** view using `google/medgemma-27b-text-it` through Hugging Face Inference Providers
+- **Lost Income** demo using validated uploaded training data and an in-session LightGBM regression pipeline
+- Optional Google Drive loading
 
 ## Project Structure
 
 ```text
 ├── app.py                         # Main Streamlit UI
-├── data_loader.py                 # xlsx parsing + normalization + stable event IDs
-├── injury_progression.py          # deterministic injury severity/trend inference + body-map timeline
+├── data_loader.py                 # XLSX parsing, normalization, and stable event IDs
+├── injury_progression.py          # Deterministic severity/trend inference and body-map timeline
+├── lost_income.py                 # Pydantic validation and LightGBM demo model
 ├── summarizer.py                  # Hugging Face medical summarization adapter
-├── drive_client.py                # optional Google Drive download logic
-├── requirements.txt
+├── drive_client.py                # Optional Google Drive download logic
 ├── tests/
-│   └── test_injury_progression.py
-├── .streamlit/
-│   └── config.toml
-└── scripts/
-    └── create_sample_xlsx.py
+│   ├── test_injury_progression.py
+│   └── test_lost_income.py
+├── pyproject.toml                 # Primary Python dependency definition for uv
+├── requirements.txt               # Compatibility file for Streamlit Community Cloud
+├── .python-version                # Python 3.12
+├── Dockerfile
+├── .dockerignore
+└── .streamlit/
+    └── config.toml
 ```
 
-## Quick Start
+## Local Development with uv
+
+Install `uv`, then run:
+
+```bash
+uv sync
+uv run streamlit run app.py
+```
+
+Open `http://localhost:8501`.
+
+The first project sync creates `uv.lock`. Commit that file after generating it so future installs can use the exact dependency graph:
+
+```bash
+uv lock
+uv sync --locked
+```
+
+The existing pip workflow remains available if needed:
 
 ```bash
 python -m venv .venv
@@ -41,9 +63,49 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open `http://localhost:8501` and upload a medical chronology `.xlsx` file.
+## Docker
 
-## Expected Excel Schema
+### Build the image
+
+```bash
+docker build -t swans-medical-chronology .
+```
+
+### Run without external summarization
+
+```bash
+docker run --rm -p 8501:8501 swans-medical-chronology
+```
+
+Open `http://localhost:8501`.
+
+### Run with Hugging Face credentials
+
+Create a local `.streamlit/secrets.toml` file:
+
+```toml
+[huggingface]
+api_token = "hf_YOUR_TOKEN"
+```
+
+Then mount it read-only when starting the container:
+
+```bash
+docker run --rm \
+  -p 8501:8501 \
+  -v "$PWD/.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro" \
+  swans-medical-chronology
+```
+
+Do not copy API tokens or credentials into the Dockerfile or image.
+
+### Container data behavior
+
+Uploaded medical files, uploaded lost-income training data, parsed DataFrames, and the trained LightGBM pipeline remain in the running Streamlit process/container memory. They are not persisted by this Docker setup. Restarting or replacing the container removes that in-memory state.
+
+The MedGemma Summary feature is different: when the user requests a summary, selected chronology text is sent to the configured external Hugging Face inference provider.
+
+## Expected Medical Chronology Schema
 
 | Column | Example |
 | --- | --- |
@@ -56,82 +118,76 @@ Open `http://localhost:8501` and upload a medical chronology `.xlsx` file.
 | Summary | Clinical narrative |
 | Link To Pdf | Cell text with hyperlink URL |
 
-Each source row receives a stable event ID based on its Excel row number. These IDs remain visible in the table and timeline so generated outputs can be checked against the source records.
+Each source row receives a stable event ID based on its Excel row number. These IDs remain visible so generated outputs can be checked against the source records.
+
+## Lost Income Training Schema
+
+The demo training upload accepts CSV or XLSX data with these columns:
+
+| Input/target column |
+| --- |
+| Incident Type |
+| Injury |
+| Salary |
+| Dependents |
+| Age |
+| Residency |
+| Personal/Commerical |
+| Lost Income |
+
+The corrected spelling `Personal/Commercial` is also accepted and normalized. The model is a deliberately simple LightGBM regressor stored only in Streamlit session state. Its output is synthetic/demo functionality, not a legal, actuarial, or financial damages calculation.
 
 ## Medical Summarization
 
-The demo uses the Apache-2.0 `Falconsai/medical_summarization` model through Hugging Face's hosted `hf-inference` provider. The Streamlit app therefore does not load or host a language model itself and no dedicated GPU endpoint is required.
+The Summary tab sends the events selected by the sidebar filters to `google/medgemma-27b-text-it` through Hugging Face Inference Providers. The application does not host the language model inside Streamlit or inside the Docker container.
 
-### 1. Create a Hugging Face token
+For large chronologies, the application orders records chronologically, divides them into chunks, summarizes each chunk, and recursively reduces the intermediate summaries.
 
-Create a Hugging Face access token with permission to use Inference Providers.
-
-### 2. Add the token to Streamlit secrets
-
-For local development, create `.streamlit/secrets.toml`. In Streamlit Community Cloud, open **App settings → Secrets**.
-
-```toml
-[huggingface]
-api_token = "hf_YOUR_TOKEN"
-```
-
-Do not commit this token to GitHub.
-
-### Summary behavior
-
-The Summary tab sends the events selected by the existing sidebar filters to the summarizer. Because the model has a relatively small input window, the application:
-
-1. orders the selected events chronologically;
-2. divides the record text into conservative model-sized chunks;
-3. summarizes each chunk through Hugging Face Inference;
-4. recursively summarizes the intermediate results until one summary remains.
-
-This is intentionally a lightweight demo architecture. `Falconsai/medical_summarization` is a task-specific summarization model rather than an instruction-following medical LLM, so the application does not claim sentence-level citations, diagnosis reasoning, or medical advice. The Summary tab displays the exact source events used so the output can be manually checked.
-
-For large chronologies, narrow the event selection with the sidebar filters before generating a summary. This reduces inference calls and usually produces a more focused result.
+Without a Hugging Face token, the local table, timeline, charts, injury progression, and lost-income features remain available.
 
 ## Injury Progression
 
-The **Injury Progression** tab is designed as an auditable chronology aid rather than a clinical scoring system.
+The **Injury Progression** tab is an auditable chronology aid rather than a clinical scoring system.
 
-1. Choose whether to analyze the **entire chronology** or only the **currently filtered records**. Entire chronology is the default so a text, provider, or facility filter does not silently remove later improvement or resolution records.
-2. Select the **body part** to follow. All medicine types are selected by default, and multiple medicine types can be included simultaneously so emergency, radiology, orthopedics, physical therapy, and other records form one continuous progression.
-3. Every selected encounter for that body part remains on the timeline after severity has been established, even when the encounter does not change the severity score. If a later record has no new severity estimate, the prior severity is carried forward and explicitly labeled as carried forward instead of dropping that specialty from the progression.
-4. Severity and trend are inferred separately from body-specific sentences:
-   - **Mild**: pain score 1–3/10 or mild/generic symptom evidence
-   - **Moderate**: pain score 4–6/10 or moderate/functional findings such as limited range of motion or swelling
-   - **Severe**: pain score 7–10/10 or strong findings such as severe symptoms, fracture, dislocation, rupture, or neurological deficit
-   - **Trend**: new, improving, stable, worsening, resolved, or unknown
-5. Numeric change is compared across events. For example, 9/10 → 7/10 remains severe but is marked **improving**, while 9/10 → 3/10 changes from severe to mild and is also marked improving.
-6. The inference engine uses only sentences that mention the selected anatomy. If the spreadsheet lists a body part but the summary has no body-specific severity statement, the result remains **Unknown / low confidence** instead of borrowing severity language from another injury.
+1. Choose the entire chronology or the currently filtered records.
+2. Select the body part and medicine types to include.
+3. Severity and trend are inferred separately from body-specific sentences.
+4. Pain scores map to resolved, mild, moderate, or severe categories.
+5. Explicit improvement, worsening, stability, and resolution language informs trend.
+6. When appropriate, numeric pain/severity changes are compared across events.
 7. Negated findings such as “no fracture” are excluded from positive severity evidence.
-8. Front and back body maps are separate. Unrecognized anatomy is reported as unmapped rather than being silently placed at a default torso coordinate.
-9. Timeline spacing is proportional to elapsed time, every card identifies its medicine type, and each progression point carries the stable event ID plus a source PDF link when available.
+8. Once severity is established, a later encounter without new severity evidence can carry forward the previous state and is explicitly marked as carried forward.
+9. Every progression point retains event IDs, evidence, provider/facility metadata, medicine type, and source links when available.
 
-Expand **Review and correct inferred progression** to inspect the event ID, date, provider, facility, medicine type, pain score, confidence, matched evidence, and inference reason. Severity and trend can each be manually overridden before the figure is used.
+Review inferred results against the underlying records. The rules are intentionally deterministic and explainable, but they can miss unusual terminology or context.
 
-The keyword/rule-based inference is intentionally deterministic and explainable, but it can still miss context or unusual terminology. Review inferred results against the underlying medical records.
+## Tests
+
+Run the test suite with:
+
+```bash
+uv run python -m unittest discover -s tests -v
+```
 
 ## Deploy to Streamlit Community Cloud
 
 1. Push the desired branch to GitHub.
-2. Sign in at `share.streamlit.io` with the GitHub account that can access the repository.
-3. Create an app using:
+2. Create the app at `share.streamlit.io` using:
    - **Repository:** `BaylorBrangers/Swans_Hackathon`
-   - **Branch:** your deployment branch
-   - **Main file path:** `app.py`
-4. Add the `[huggingface]` secret shown above.
-5. Deploy.
+   - **Branch:** the desired deployment branch
+   - **Main file:** `app.py`
+3. Add the `[huggingface]` secret if the Summary feature should be enabled.
+4. Deploy.
 
-Without the Hugging Face token, upload/search/timeline/chart functionality still works; the Summary tab displays configuration instructions instead of calling the model.
+`requirements.txt` is retained so the existing Community Cloud deployment path continues to work.
 
 ## Google Drive Setup (Optional)
 
-`drive_client.py` remains available for automatic Drive loading. Configure a Google service account and grant it read access to the chronology file/folder before enabling that path.
+`drive_client.py` remains available for automatic Drive loading. Configure a Google service account and grant it read access to the required chronology file or folder before enabling that path.
 
 ## Security
 
-- Never commit Hugging Face tokens, Google credentials, or `.streamlit/secrets.toml`.
-- When a summary is generated, selected medical-record text is sent to Hugging Face's hosted inference service.
-- Use synthetic or appropriately de-identified data for this demo unless you have confirmed that the chosen infrastructure and agreements are appropriate for identifiable health information.
-- Generated summaries can omit or misstate information and must be checked against the source records.
+- Never commit Hugging Face tokens, Google credentials, `.env`, or `.streamlit/secrets.toml`.
+- `.dockerignore` excludes common credential files and Excel/CSV data from image builds.
+- Use synthetic or appropriately de-identified medical data unless the deployment infrastructure and contractual controls are suitable for identifiable health information.
+- Generated summaries and inferred severity/progression results must be checked against source records.
