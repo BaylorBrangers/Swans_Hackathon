@@ -252,15 +252,6 @@ The Docker image can be deployed to a container host such as Google Cloud Run, R
 
 The current Dockerfile listens on port `8501`, so a platform deploying it without modification must route traffic to container port `8501`.
 
-For Cloud Run, a straightforward configuration is:
-
-```text
-Source repository: BaylorBrangers/Swans_Hackathon
-Build type:        Dockerfile
-Container port:    8501
-```
-
-Secrets should be supplied at runtime rather than committed to the image. For example, on Cloud Run a Streamlit `secrets.toml` can be provided from Secret Manager as a mounted secret file.
 
 ## Data and model storage
 
@@ -317,12 +308,6 @@ uv run pytest
 - The current app requires a chronology XLSX to be loaded before the six tabs, including Lost Income, are rendered.
 - If sidebar filters produce zero chronology events, the current app returns before rendering the tabs.
 
-## Security and privacy
-
-- Never commit Hugging Face tokens, Google credentials, `.env`, or `.streamlit/secrets.toml`.
-- `.dockerignore` excludes common secret files and spreadsheet/CSV data from the Docker build context.
-- The application is a prototype and has not been presented as HIPAA-, GDPR-, or other health-data-compliance certified infrastructure.
-- Use synthetic or appropriately de-identified data unless the deployment environment, external inference provider, access controls, retention behavior, and contractual arrangements have been reviewed for the intended data.
 
 ## Intended use
 
